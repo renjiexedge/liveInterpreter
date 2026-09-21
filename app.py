@@ -3,6 +3,9 @@ import sys
 
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QPushButton, QWidget, QMainWindow, QLabel, QLineEdit, QVBoxLayout, QComboBox)
 from PySide6.QtCore import Qt, QSize
+
+from audio.devices import DeviceNotFoundError, find_input_device, list_input_devices, list_output_devices
+from config.audio_config import AudioDeviceConfig
 # Only needed for access to command line arguments
 
 # Southeast Asian languages: display name -> BCP-47 language code
@@ -52,20 +55,44 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(header_label_2)
         header_layout.addWidget(header_combo)
 
+        #2nd row of app header: Selecting Input & Output devices.
+        input_label = QLabel("Input Device:")
+        output_label = QLabel("Output Device:")
+        input_combo = QComboBox()
+        output_combo = QComboBox()
+        input_combo.setEditable(False)
+        output_combo.setEditable(False)
+        # Populate with real devices; item data holds the sounddevice index.
+        for device in list_input_devices():
+            input_combo.addItem(device.name, device.index)
+        for device in list_output_devices():
+            output_combo.addItem(device.name, device.index)
+        # Preselect the default (CABLE) device if present; otherwise keep the first entry.
+        try:
+            input_combo.setCurrentIndex(input_combo.findData(find_input_device(AudioDeviceConfig()).index))
+        except DeviceNotFoundError:
+            pass
+        self.input_combo = input_combo
+        self.output_combo = output_combo
+
+        # Create a horizontal layout for the input/output device selection
+        device_layout = QHBoxLayout()
+        device_layout.addWidget(input_label)
+        device_layout.addWidget(input_combo)
+        device_layout.addWidget(output_label)
+        device_layout.addWidget(output_combo)
+
         # Show the initially selected language in the label.
         self.on_language_changed(header_combo.currentIndex())
 
+        #Final layout for the app window.
         layout = QVBoxLayout()
         layout.addLayout(header_layout)
-        #layout.addWidget(self.input)
+        layout.addLayout(device_layout)
         layout.addWidget(self.label)
 
         Container = QWidget()
         Container.setLayout(layout)
-
-        # self.button_is_checked = True
-        # self.button = QPushButton("Press Me!")
-        # self.button.clicked.connect(self.the_button_was_clicked)
 
         # Set the central widget of the Window.
         self.setCentralWidget(Container)
@@ -74,6 +101,11 @@ class MainWindow(QMainWindow):
         language_name = self.header_combo.itemText(index)
         language_code = self.header_combo.itemData(index)
         self.label.setText(f"{language_name}: {language_code}")
+
+    def selected_input_config(self) -> AudioDeviceConfig:
+        """AudioDeviceConfig for the device chosen in the input combo, ready to
+        pass to build_audio_pipeline(); AudioRouter resolves it via device_index."""
+        return AudioDeviceConfig(device_index=self.input_combo.currentData())
 
     def the_button_was_clicked(self):
         self.button.setText("You already clicked me.")
@@ -96,6 +128,3 @@ app.exec()
 # Your application won't reach here until you exit and the event
 # loop has stopped.
 
-
-
-#needs combobox with options for different languages.
