@@ -46,15 +46,21 @@ def list_output_devices() -> list[DeviceInfo]:
 
 
 def find_input_device(config: AudioDeviceConfig) -> DeviceInfo:
-    devices = list_input_devices()
+    return _find_device(list_input_devices(), config, kind="input")
 
+
+def find_output_device(config: AudioDeviceConfig) -> DeviceInfo:
+    return _find_device(list_output_devices(), config, kind="output")
+
+
+def _find_device(devices: list[DeviceInfo], config: AudioDeviceConfig, kind: str) -> DeviceInfo:
     if config.device_index is not None:
         for device in devices:
             if device.index == config.device_index:
                 return device
         raise DeviceNotFoundError(
-            f"No input device with index {config.device_index}. "
-            f"Available input devices: {_format_devices(devices)}"
+            f"No {kind} device with index {config.device_index}. "
+            f"Available {kind} devices: {_format_devices(devices)}"
         )
 
     if config.exact_name is not None:
@@ -62,8 +68,8 @@ def find_input_device(config: AudioDeviceConfig) -> DeviceInfo:
             if device.name == config.exact_name:
                 return device
         raise DeviceNotFoundError(
-            f"No input device named {config.exact_name!r}. "
-            f"Available input devices: {_format_devices(devices)}"
+            f"No {kind} device named {config.exact_name!r}. "
+            f"Available {kind} devices: {_format_devices(devices)}"
         )
 
     needle = config.name_substring.lower()
@@ -72,8 +78,8 @@ def find_input_device(config: AudioDeviceConfig) -> DeviceInfo:
             return device
 
     raise DeviceNotFoundError(
-        f"No input device matching {config.name_substring!r}. "
-        f"Available input devices: {_format_devices(devices)}"
+        f"No {kind} device matching {config.name_substring!r}. "
+        f"Available {kind} devices: {_format_devices(devices)}"
     )
 
 

@@ -3,7 +3,8 @@ from dataclasses import dataclass
 
 @dataclass
 class AudioDeviceConfig:
-    """Selects which input device AudioRouter should capture from."""
+    """Selects a device by name, exact name, or index. Shared by AudioRouter
+    (input capture) and AudioPlayer (output playback)."""
 
     name_substring: str = "CABLE"
     device_index: int | None = None
