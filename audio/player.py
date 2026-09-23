@@ -1,22 +1,37 @@
 import logging
+import threading
+import time
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 import soxr
 
+from app_logging.audio_log import RawAudioDumper
 from audio.devices import find_output_device
 from config.audio_config import AudioDeviceConfig
 
 logger = logging.getLogger(__name__)
+
+_UNDERRUN_LOG_INTERVAL_S = 5.0
+_DRAIN_MARGIN_S = 1.0  # slack added on top of the buffer's own playback time in stop()
 
 
 class AudioPlayer:
     """Owns the output device and plays incoming mono PCM16 audio through it.
 
     Mirror of AudioRouter for the output side: AudioRouter pulls hardware
-    audio in and resamples it to the rate an engine wants to send; AudioPlayer
-    takes an engine's output audio at its native rate and resamples it to
-    whatever rate the chosen output device actually runs at.
+    audio in via a callback on PortAudio's real-time thread and hands it off
+    to a JitterBuffer for the async side to drain; AudioPlayer takes an
+    engine's output audio from the async side and hands it to a callback on
+    PortAudio's real-time thread to drain, via an internal buffer.
+
+    This is deliberately callback-driven rather than using OutputStream's
+    blocking .write(): A/B testing against sd.play() (which is
+    callback-driven internally) with identical post-resample samples showed
+    the blocking-write approach produced persistent low-level static
+    independent of buffer size or write chunk size, while the callback
+    approach was clean.
     """
 
     def __init__(
@@ -24,12 +39,26 @@ class AudioPlayer:
         device_config: AudioDeviceConfig,
         source_rate: int,
         resample_quality: str = "HQ",
+        debug_dump_path: str | Path | None = None,
     ):
         self._device_config = device_config
         self._source_rate = source_rate
         self._resample_quality = resample_quality
         self._resampler: soxr.ResampleStream | None = None
         self._stream: sd.OutputStream | None = None
+        self._debug_dump_path = debug_dump_path
+        self._dumper: RawAudioDumper | None = None
+
+        self._buffer = bytearray()
+        self._buffer_lock = threading.Lock()
+        self._underrun_count = 0
+        self._last_underrun_log = 0.0
+
+    @property
+    def underrun_count(self) -> int:
+        """How many times the callback ran dry (our buffer had no data, or
+        PortAudio itself reported an underflow) since start()."""
+        return self._underrun_count
 
     def start(self) -> None:
         device = find_output_device(self._device_config)
@@ -49,8 +78,18 @@ class AudioPlayer:
             samplerate=native_rate,
             channels=1,
             dtype="int16",
+            latency="high",
+            callback=self._callback,
         )
         self._stream.start()
+
+        if self._debug_dump_path is not None:
+            # Captures exactly what gets handed to the device, post-resample
+            # -- lets you compare against the pre-resample dump to see
+            # whether corruption is introduced by resample_chunk() or by
+            # the device write step.
+            self._dumper = RawAudioDumper(self._debug_dump_path, sample_rate=native_rate)
+
         logger.info(
             "AudioPlayer started on %r (%d Hz, resampling from %d Hz: %s)",
             device.name,
@@ -59,23 +98,88 @@ class AudioPlayer:
             self._resampler is not None,
         )
 
+    def _callback(self, outdata, frames, time_info, status) -> None:
+        """Runs on PortAudio's real-time thread. Pulls exactly `frames`
+        samples from the internal buffer, padding with silence if not
+        enough has arrived yet rather than blocking."""
+        if status.output_underflow:
+            self._log_underrun("PortAudio reported an output underflow")
+
+        needed_bytes = frames * 2  # mono int16
+        with self._buffer_lock:
+            available = len(self._buffer)
+            take = min(available, needed_bytes)
+            chunk = bytes(self._buffer[:take])
+            del self._buffer[:take]
+
+        samples = np.frombuffer(chunk, dtype="<i2")
+        outdata[: len(samples), 0] = samples
+        if len(samples) < frames:
+            outdata[len(samples):, 0] = 0
+            self._log_underrun(f"internal buffer had {len(samples)}/{frames} frames available")
+
+    def _log_underrun(self, reason: str) -> None:
+        self._underrun_count += 1
+        now = time.monotonic()
+        if now - self._last_underrun_log > _UNDERRUN_LOG_INTERVAL_S:
+            logger.warning("Output underrun: %s", reason)
+            self._last_underrun_log = now
+
     def write(self, pcm_bytes: bytes) -> None:
-        """Blocking write; call via asyncio.to_thread from the async side."""
+        """Resample and append to the internal buffer; the real-time
+        callback drains it at its own pace. Non-blocking (aside from a
+        brief lock), safe to call from any thread."""
         samples = np.frombuffer(pcm_bytes, dtype="<i2")
         if self._resampler is not None:
             samples = self._resampler.resample_chunk(samples)
-        if len(samples):
-            self._stream.write(samples.reshape(-1, 1))
+        if not len(samples):
+            return
+        if self._dumper is not None:
+            self._dumper.write(samples.tobytes())
+        with self._buffer_lock:
+            self._buffer.extend(samples.tobytes())
 
     def stop(self) -> None:
         if self._resampler is not None:
             trailing = self._resampler.resample_chunk(np.empty(0, dtype="<i2"), last=True)
-            if len(trailing) and self._stream is not None:
-                self._stream.write(trailing.reshape(-1, 1))
+            if len(trailing):
+                with self._buffer_lock:
+                    self._buffer.extend(trailing.tobytes())
+            clips = self._resampler.num_clips()
+            if clips:
+                logger.warning(
+                    "Output resampler clipped %d sample(s) this session "
+                    "(int16 resample has no headroom -- see audio/resample.py's "
+                    "float32 + explicit clip pattern for comparison)",
+                    clips,
+                )
             self._resampler = None
 
         if self._stream is not None:
+            # Let the callback drain whatever's left so the tail of the
+            # audio isn't cut off, but don't wait forever if it can't. The
+            # timeout scales with how much is actually buffered (write() no
+            # longer blocks, so a caller may have queued more than one
+            # chunk's worth ahead of this call) plus a fixed safety margin.
+            with self._buffer_lock:
+                remaining = len(self._buffer)
+            expected_drain_s = remaining / 2 / self._stream.samplerate  # mono int16
+            deadline = time.monotonic() + expected_drain_s + _DRAIN_MARGIN_S
+            while time.monotonic() < deadline:
+                with self._buffer_lock:
+                    remaining = len(self._buffer)
+                if remaining == 0:
+                    break
+                time.sleep(0.02)
+            else:
+                logger.warning("AudioPlayer stop: buffer didn't fully drain before timeout")
+
             self._stream.stop()
             self._stream.close()
             self._stream = None
-        logger.info("AudioPlayer stopped")
+
+        if self._dumper is not None:
+            self._dumper.close()
+            self._dumper = None
+
+        logger.info("AudioPlayer stopped (%d underrun(s) total)", self._underrun_count)

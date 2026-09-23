@@ -1,11 +1,15 @@
 import asyncio
 import os
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+from app_logging.audio_log import RawAudioDumper, log_interrupted, log_mime_type
+from app_logging.gemini_log import log_audio_received, log_audio_sent, log_transcript
 from audio.player import AudioPlayer
 from config.audio_config import AudioDeviceConfig
 
@@ -40,12 +44,14 @@ async def send_audio(session, audio_queue):
         await session.send_realtime_input(
             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
         )
+        log_audio_sent(chunk)
 
 
 async def receive_responses(
     session,
     audio_player: AudioPlayer,
     on_transcript: TranscriptCallback | None,
+    raw_dumper: RawAudioDumper | None = None,
 ) -> None:
     """Play translated audio through audio_player and report each finished
     input/output transcript pair via on_transcript as {"input": ..., "output": ...}."""
@@ -55,17 +61,26 @@ async def receive_responses(
         server_content = response.server_content
         if not server_content:
             continue
+        log_interrupted(server_content.interrupted)
         if server_content.input_transcription:
-            input_text += server_content.input_transcription.text
+            # .text can be None on some deltas (e.g. an interim/empty update).
+            input_text += server_content.input_transcription.text or ""
         if server_content.output_transcription:
-            output_text += server_content.output_transcription.text
+            output_text += server_content.output_transcription.text or ""
         if server_content.model_turn:
             for part in server_content.model_turn.parts:
                 if part.inline_data and isinstance(part.inline_data.data, bytes):
+                    log_mime_type(part.inline_data.mime_type)
+                    log_audio_received(part.inline_data.data)
+                    if raw_dumper is not None:
+                        raw_dumper.write(part.inline_data.data)
                     await asyncio.to_thread(audio_player.write, part.inline_data.data)
         if server_content.turn_complete:
-            if (input_text or output_text) and on_transcript is not None:
-                on_transcript({"input": input_text, "output": output_text})
+            if input_text or output_text:
+                transcript = {"input": input_text, "output": output_text}
+                log_transcript(transcript)
+                if on_transcript is not None:
+                    on_transcript(transcript)
             input_text = ""
             output_text = ""
 
@@ -74,6 +89,7 @@ async def run_session(
     audio_queue,
     output_device_config: AudioDeviceConfig | None = None,
     on_transcript: TranscriptCallback | None = None,
+    dump_raw_audio: bool = True,
 ) -> None:
     """Open a Live translation session and run sending/receiving concurrently.
 
@@ -81,6 +97,12 @@ async def run_session(
     targeting output_device_config (defaults to the virtual cable, matching
     AudioDeviceConfig's default). Each finished input/output transcript pair
     is reported via on_transcript as it completes.
+
+    When dump_raw_audio is True, every received audio chunk is also written,
+    unmodified, to debug_dumps/received_<timestamp>.wav -- bypassing
+    AudioPlayer's resample/device-output step entirely, so the file can be
+    checked externally to see whether distortion is already present in the
+    bytes Gemini sends.
 
     Stops as soon as either side finishes (e.g. the caller stops feeding
     audio, or the server closes the stream), cancelling the other.
@@ -90,12 +112,20 @@ async def run_session(
         source_rate=RECEIVE_SAMPLE_RATE,
     )
     audio_player.start()
+
+    raw_dumper: RawAudioDumper | None = None
+    if dump_raw_audio:
+        dump_dir = Path("debug_dumps")
+        dump_dir.mkdir(exist_ok=True)
+        dump_path = dump_dir / f"received_{datetime.now():%Y%m%d_%H%M%S}.wav"
+        raw_dumper = RawAudioDumper(dump_path, sample_rate=RECEIVE_SAMPLE_RATE)
+
     try:
         async with client.aio.live.connect(model=MODEL, config=config) as session:
             print("Session started with translation")
             send_task = asyncio.create_task(send_audio(session, audio_queue))
             receive_task = asyncio.create_task(
-                receive_responses(session, audio_player, on_transcript)
+                receive_responses(session, audio_player, on_transcript, raw_dumper)
             )
 
             done, pending = await asyncio.wait(
@@ -108,6 +138,8 @@ async def run_session(
                 task.result()  # re-raise any exception the task hit
     finally:
         audio_player.stop()
+        if raw_dumper is not None:
+            raw_dumper.close()
 
 
 async def main():
