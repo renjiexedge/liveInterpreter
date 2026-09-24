@@ -17,20 +17,23 @@ load_dotenv()  # reads .env in the project root into the process environment
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-3.5-live-translate-preview" # or "gemini-3.5-live-translate-preview" for preview model
-TARGET_LANGUAGE_CODE = "en"  # Set your desired target language code here
+DEFAULT_TARGET_LANGUAGE_CODE = "en"  # used when the caller doesn't pick a language
 RECEIVE_SAMPLE_RATE = 24000  # PCM16 rate Gemini streams translated audio back at
 
 client = genai.Client(api_key=API_KEY)
 
-config = types.LiveConnectConfig(
-    response_modalities=["AUDIO"],
-    input_audio_transcription=types.AudioTranscriptionConfig(),
-    output_audio_transcription=types.AudioTranscriptionConfig(),
-    translation_config=types.TranslationConfig(
-        target_language_code=TARGET_LANGUAGE_CODE,
-        echo_target_language=True,
-    ),
-)
+
+def build_live_config(target_language_code: str) -> types.LiveConnectConfig:
+    """LiveConnectConfig for a translation session into target_language_code (BCP-47)."""
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        translation_config=types.TranslationConfig(
+            target_language_code=target_language_code,
+            echo_target_language=True,
+        ),
+    )
 
 TranscriptCallback = Callable[[dict[str, str]], None]
 
@@ -90,8 +93,12 @@ async def run_session(
     output_device_config: AudioDeviceConfig | None = None,
     on_transcript: TranscriptCallback | None = None,
     dump_raw_audio: bool = True,
+    target_language_code: str = DEFAULT_TARGET_LANGUAGE_CODE,
 ) -> None:
     """Open a Live translation session and run sending/receiving concurrently.
+
+    Speech is translated into target_language_code (BCP-47, e.g. "en", "th").
+    The language is fixed for the lifetime of the session.
 
     Translated audio is played out through the audio/ package's AudioPlayer,
     targeting output_device_config (defaults to the virtual cable, matching
@@ -121,8 +128,9 @@ async def run_session(
         raw_dumper = RawAudioDumper(dump_path, sample_rate=RECEIVE_SAMPLE_RATE)
 
     try:
+        config = build_live_config(target_language_code)
         async with client.aio.live.connect(model=MODEL, config=config) as session:
-            print("Session started with translation")
+            print(f"Session started with translation to {target_language_code!r}")
             send_task = asyncio.create_task(send_audio(session, audio_queue))
             receive_task = asyncio.create_task(
                 receive_responses(session, audio_player, on_transcript, raw_dumper)

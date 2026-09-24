@@ -3,7 +3,7 @@ import asyncio
 import sys
 import threading
 
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QPushButton, QWidget, QMainWindow, QLabel, QLineEdit, QVBoxLayout, QComboBox, QScrollArea)
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QPushButton, QWidget, QMainWindow, QLabel, QVBoxLayout, QComboBox, QScrollArea)
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 
 from audio.devices import DeviceNotFoundError, find_input_device, list_input_devices, list_output_devices
@@ -68,8 +68,8 @@ class MainWindow(QMainWindow):
         for language_name, language_code in SOUTHEAST_ASIA_LANGUAGES.items():
             header_combo.addItem(language_name, language_code)
         header_combo.setCurrentText("English (Singapore)")
-        # self.header_combo = header_combo
-        # header_combo.currentIndexChanged.connect(self.on_language_changed)
+        # Item data holds the BCP-47 code passed to run_session as the target language.
+        self.language_combo = header_combo
         header_label_2.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout = QHBoxLayout();
         header_layout.addWidget(header_label_1)
@@ -106,9 +106,6 @@ class MainWindow(QMainWindow):
         device_layout.addWidget(input_combo)
         device_layout.addWidget(output_label)
         device_layout.addWidget(output_combo)
-
-        # Show the initially selected language in the label.
-        # self.on_language_changed(header_combo.currentIndex())
 
         # Scroll area of transcript pairs, centered in the window. Each
         # completed {"input": ..., "output": ...} pair from the translation
@@ -147,11 +144,6 @@ class MainWindow(QMainWindow):
         # Set the central widget of the Window.
         self.setCentralWidget(Container)
 
-    # def on_language_changed(self, index):
-    #     language_name = self.header_combo.itemText(index)
-    #     language_code = self.header_combo.itemData(index)
-    #     self.label.setText(f"{language_name}: {language_code}")
-
     def start_live_translation(self):
         """Build the audio pipeline for the selected devices and run the
         translation session on a background thread with its own asyncio
@@ -161,13 +153,17 @@ class MainWindow(QMainWindow):
 
         input_config = self.selected_input_config()
         output_config = self.selected_output_config()
+        target_language_code = self.selected_language_code()
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        # The target language is fixed for the session's lifetime; lock it until
+        # _on_session_ended re-enables it.
+        self.language_combo.setEnabled(False)
 
         self._session_thread = threading.Thread(
             target=self._run_session_thread,
-            args=(input_config, output_config),
+            args=(input_config, output_config, target_language_code),
             daemon=True,
         )
         self._session_thread.start()
@@ -180,17 +176,17 @@ class MainWindow(QMainWindow):
         if self._router is not None:
             self._router.stop()
 
-    def _run_session_thread(self, input_config: AudioDeviceConfig, output_config: AudioDeviceConfig) -> None:
+    def _run_session_thread(self, input_config: AudioDeviceConfig, output_config: AudioDeviceConfig, target_language_code: str) -> None:
         """Entry point for the background session thread."""
         error_message = ""
         try:
-            asyncio.run(self._translation_main(input_config, output_config))
+            asyncio.run(self._translation_main(input_config, output_config, target_language_code))
         except Exception as exc:
             error_message = str(exc)
         finally:
             self.session_ended.emit(error_message)
 
-    async def _translation_main(self, input_config: AudioDeviceConfig, output_config: AudioDeviceConfig) -> None:
+    async def _translation_main(self, input_config: AudioDeviceConfig, output_config: AudioDeviceConfig, target_language_code: str) -> None:
         """Runs on the background thread's event loop: wires the input
         AudioRouter to run_session's audio_queue contract, plays translated
         audio out via run_session's own AudioPlayer, and reports transcript
@@ -203,6 +199,7 @@ class MainWindow(QMainWindow):
                 jitter_buffer,
                 output_device_config=output_config,
                 on_transcript=self.transcript_received.emit,
+                target_language_code=target_language_code,
             )
         finally:
             router.stop()
@@ -213,11 +210,17 @@ class MainWindow(QMainWindow):
         safe to touch widgets here regardless of how the session ended."""
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.language_combo.setEnabled(True)
         self._session_thread = None
         if error_message:
             # TODO: surface this in the UI (status bar/dialog) rather than the console.
             print(f"Live translation session ended with an error: {error_message}")
         print("Live translation session ended.")
+
+    def selected_language_code(self) -> str:
+        """BCP-47 code for the language chosen in the header combo, passed to
+        run_session as target_language_code."""
+        return self.language_combo.currentData()
 
     def selected_input_config(self) -> AudioDeviceConfig:
         """AudioDeviceConfig for the device chosen in the input combo, ready to
@@ -266,5 +269,8 @@ app.exec()
 # Your application won't reach here until you exit and the event
 # loop has stopped.
 
-# Create a audio file based on test cases in docs for testing the live translation session, and connect it to a function that initializes the audio pipeline and starts the session using the selected input/output devices and language.
-# Need to create a manager to concorently run 2 sessions, one for input and one for output, and connect them to the audio pipeline. 
+
+# Need to create a manager to concorently run 2 sessions, one for input and one for output, and connect them to the audio pipeline.
+# Program worked in test but audio came back distorted, transcription was not working. Need to get it working to know if audio is being sent and received correctly.
+# Figure out bug in audio buffer where when its overloaded, something breaks and gemini keeps sending repeating audio chunks. No distortion just repeating audio and new inputs does not change the output.
+# Figure out why gemini returns a different voice whenever there is a big pause when the user is talking.
