@@ -99,6 +99,8 @@ class MainWindow(QMainWindow):
         output_combo.setCurrentIndex(max(output_combo.findText("Voicemeeter Input", Qt.MatchFlag.MatchStartsWith), 0))
         self.input_combo = input_combo
         self.output_combo = output_combo
+        self.audio_test_button = QPushButton("Test Audio Devices")
+        self.audio_test_button.clicked.connect(self.test_audio_devices)
 
         # Create a horizontal layout for the input/output device selection
         device_layout = QHBoxLayout()
@@ -115,6 +117,8 @@ class MainWindow(QMainWindow):
         self.transcript_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         transcript_container = QWidget()
         transcript_container.setLayout(self.transcript_layout)
+
+        
 
         self.transcript_scroll = QScrollArea()
         self.transcript_scroll.setWidgetResizable(True)
@@ -135,6 +139,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addLayout(header_layout)
         layout.addLayout(device_layout)
+        layout.addWidget(self.audio_test_button)
         layout.addWidget(self.transcript_scroll, stretch=1)
         layout.addLayout(footer_layout)
 
@@ -143,6 +148,10 @@ class MainWindow(QMainWindow):
 
         # Set the central widget of the Window.
         self.setCentralWidget(Container)
+
+    def test_audio_devices(self):
+        """Placeholder for testing the selected input/output devices. In a real app, this will play a test sound into the input device, and output it to the output device while ensuring the input device does not echo back the output device's audio."""
+        pass
 
     def start_live_translation(self):
         """Build the audio pipeline for the selected devices and run the
@@ -269,8 +278,7 @@ app.exec()
 # Your application won't reach here until you exit and the event
 # loop has stopped.
 
-
+#todo:
 # Need to create a manager to concorently run 2 sessions, one for input and one for output, and connect them to the audio pipeline.
-# Program worked in test but audio came back distorted, transcription was not working. Need to get it working to know if audio is being sent and received correctly.
 # Figure out bug in audio buffer where when its overloaded, something breaks and gemini keeps sending repeating audio chunks. No distortion just repeating audio and new inputs does not change the output.
 # Figure out why gemini returns a different voice whenever there is a big pause when the user is talking.
