@@ -15,6 +15,7 @@ triage:
 
 import logging
 import sys
+import threading
 import wave
 from pathlib import Path
 
@@ -30,17 +31,23 @@ if not logger.handlers:
     logger.addHandler(_handler)
 
 
-def log_mime_type(mime_type: str | None) -> None:
-    """Log the mime_type Gemini reports on a received audio part."""
-    logger.info("Received audio part mime_type: %r", mime_type)
+def _prefix(label: str) -> str:
+    return f"[{label}] " if label else ""
 
 
-def log_interrupted(interrupted: bool | None) -> None:
+def log_mime_type(mime_type: str | None, label: str = "") -> None:
+    """Log the mime_type Gemini reports on a received audio part. The caller
+    only calls this when it changes, not for every part."""
+    logger.info("%sReceived audio part mime_type: %r", _prefix(label), mime_type)
+
+
+def log_interrupted(interrupted: bool | None, label: str = "") -> None:
     """Log when the server reports the current model turn was interrupted."""
     if interrupted:
         logger.warning(
-            "Turn interrupted by server (stale queued audio may still be "
-            "playing -- receive_responses does not currently clear it)"
+            "%sTurn interrupted by server (stale queued audio may still be "
+            "playing -- receive_responses does not currently clear it)",
+            _prefix(label),
         )
 
 
@@ -69,11 +76,20 @@ class RawAudioDumper:
         self._wav.setnchannels(channels)
         self._wav.setsampwidth(sample_width)
         self._wav.setframerate(sample_rate)
+        # write() runs on a worker thread (asyncio.to_thread). A cancelled
+        # session can leave one still running when close() is called, so both
+        # take the lock, and a write after close is dropped.
+        self._lock = threading.Lock()
+        self._closed = False
         logger.info("Dumping raw received audio to %s (%d Hz)", self._path, sample_rate)
 
     def write(self, chunk: bytes) -> None:
-        self._wav.writeframes(chunk)
+        with self._lock:
+            if not self._closed:
+                self._wav.writeframes(chunk)
 
     def close(self) -> None:
-        self._wav.close()
+        with self._lock:
+            self._closed = True
+            self._wav.close()
         logger.info("Closed raw audio dump at %s", self._path)

@@ -44,6 +44,9 @@ class MainWindow(QMainWindow):
     # Emitted from the background session thread when run_session finishes,
     # whether cleanly (empty string) or with an error (str(exception)).
     session_ended = Signal(str)
+    # Emitted from the session thread with the direction label once run_session's
+    # Live connection is open, so the status can move from connecting to translating.
+    session_connected = Signal(str)
     # audio.health.Issue raised/updated/cleared by the session's HealthMonitor.
     health_changed = Signal(object)
     # (fingerprint, start_after, list[Issue]) from the loop-test worker thread.
@@ -53,6 +56,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.transcript_received.connect(self._on_transcript_received)
         self.session_ended.connect(self._on_session_ended)
+        self.session_connected.connect(self._on_session_connected)
         self.health_changed.connect(self._on_health_changed)
         self.loop_test_finished.connect(self._on_loop_test_finished)
 
@@ -204,7 +208,7 @@ class MainWindow(QMainWindow):
 
         self._set_controls_locked(True)
         self.stop_button.setEnabled(True)
-        self._set_status("Translating.")
+        self._set_status("Connecting…")
         self._session_thread = threading.Thread(
             target=self._run_session_thread,
             args=(directions[0],),
@@ -295,6 +299,8 @@ class MainWindow(QMainWindow):
                 echo_target_language=direction.echo_target_language,
                 on_transcript_delta=lambda kind, text: monitor.transcript_delta(direction.label, kind, text),
                 on_player_ready=lambda player: monitor.player_ready(direction.label, player),
+                label=direction.label,
+                on_connected=lambda: self.session_connected.emit(direction.label),
             )
         finally:
             if monitor_task is not None:
@@ -304,6 +310,12 @@ class MainWindow(QMainWindow):
             router.stop()
             self._router = None
             self._health = None
+
+    def _on_session_connected(self, label: str) -> None:
+        """Slot for session_connected (GUI thread). Ignored if Stop already
+        ended the session while it was still connecting."""
+        if self._session_thread is not None:
+            self._set_status("Translating.")
 
     def _on_session_ended(self, error_message: str) -> None:
         """Slot for session_ended: always runs on the GUI thread, so it's
