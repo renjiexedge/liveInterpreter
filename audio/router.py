@@ -1,16 +1,19 @@
 import logging
 import time
 
+import numpy as np
 import sounddevice as sd
 
 from audio.buffers import JitterBuffer
 from audio.devices import find_input_device
 from audio.resample import Resampler
 from config.audio_config import AudioDeviceConfig, AudioPipelineConfig
+from config.health_config import HealthConfig
 
 logger = logging.getLogger(__name__)
 
 _OVERFLOW_LOG_INTERVAL_S = 5.0
+_CLIP_LEVEL = HealthConfig.clip_level
 
 
 class AudioRouter:
@@ -30,6 +33,18 @@ class AudioRouter:
         self._resampler: Resampler | None = None
         self._stream: sd.InputStream | None = None
         self._last_overflow_log = 0.0
+
+        # Health stats for audio/health.HealthMonitor. Written by the callback as
+        # plain int/float stores (no locking needed), read from the session loop.
+        self.device_name = ""
+        self.last_callback_at = 0.0
+        self.block_count = 0
+        self.clipped_blocks = 0
+        self.zero_run_blocks = 0  # consecutive blocks of pure digital silence
+
+    @property
+    def zero_run_s(self) -> float:
+        return self.zero_run_blocks * self._pipeline_config.chunk_ms / 1000
 
     def start(self) -> None:
         device = find_input_device(self._device_config)
@@ -54,6 +69,8 @@ class AudioRouter:
             callback=self._callback,
         )
         self._stream.start()
+        self.device_name = device.name
+        self.last_callback_at = time.monotonic()  # watchdog grace until the first callback
         logger.info(
             "AudioRouter started on %r (%d Hz, %d ch, %d-frame blocks)",
             device.name,
@@ -68,6 +85,13 @@ class AudioRouter:
             if now - self._last_overflow_log > _OVERFLOW_LOG_INTERVAL_S:
                 logger.warning("Audio input overflow detected")
                 self._last_overflow_log = now
+
+        self.last_callback_at = time.monotonic()
+        peak = float(np.abs(indata).max()) if frames else 0.0
+        self.block_count += 1
+        if peak >= _CLIP_LEVEL:
+            self.clipped_blocks += 1
+        self.zero_run_blocks = self.zero_run_blocks + 1 if peak == 0.0 else 0
 
         pcm_bytes = self._resampler.process(indata.copy())
         self._jitter_buffer.put_from_thread(pcm_bytes)

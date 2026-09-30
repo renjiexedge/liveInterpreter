@@ -23,19 +23,26 @@ RECEIVE_SAMPLE_RATE = 24000  # PCM16 rate Gemini streams translated audio back a
 client = genai.Client(api_key=API_KEY)
 
 
-def build_live_config(target_language_code: str) -> types.LiveConnectConfig:
-    """LiveConnectConfig for a translation session into target_language_code (BCP-47)."""
+def build_live_config(target_language_code: str, echo_target_language: bool = True) -> types.LiveConnectConfig:
+    """LiveConnectConfig for a translation session into target_language_code (BCP-47).
+
+    echo_target_language=True makes the model voice speech that's already in the
+    target language too ("parrot"); False keeps it silent for such speech, which
+    also stops a re-captured translation from being played again (see DirectionConfig).
+    """
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         translation_config=types.TranslationConfig(
             target_language_code=target_language_code,
-            echo_target_language=True,
+            echo_target_language=echo_target_language,
         ),
     )
 
 TranscriptCallback = Callable[[dict[str, str]], None]
+# ("input" | "output", text) for every transcription delta, as it arrives.
+TranscriptDeltaCallback = Callable[[str, str], None]
 
 
 async def send_audio(session, audio_queue):
@@ -55,9 +62,12 @@ async def receive_responses(
     audio_player: AudioPlayer,
     on_transcript: TranscriptCallback | None,
     raw_dumper: RawAudioDumper | None = None,
+    on_transcript_delta: TranscriptDeltaCallback | None = None,
 ) -> None:
     """Play translated audio through audio_player and report each finished
-    input/output transcript pair via on_transcript as {"input": ..., "output": ...}."""
+    input/output transcript pair via on_transcript as {"input": ..., "output": ...}.
+    Each individual delta also goes to on_transcript_delta, so the echo detector
+    doesn't have to wait for turn_complete."""
     input_text = ""
     output_text = ""
     async for response in session.receive():
@@ -67,9 +77,15 @@ async def receive_responses(
         log_interrupted(server_content.interrupted)
         if server_content.input_transcription:
             # .text can be None on some deltas (e.g. an interim/empty update).
-            input_text += server_content.input_transcription.text or ""
+            delta = server_content.input_transcription.text or ""
+            input_text += delta
+            if delta and on_transcript_delta is not None:
+                on_transcript_delta("input", delta)
         if server_content.output_transcription:
-            output_text += server_content.output_transcription.text or ""
+            delta = server_content.output_transcription.text or ""
+            output_text += delta
+            if delta and on_transcript_delta is not None:
+                on_transcript_delta("output", delta)
         if server_content.model_turn:
             for part in server_content.model_turn.parts:
                 if part.inline_data and isinstance(part.inline_data.data, bytes):
@@ -94,11 +110,18 @@ async def run_session(
     on_transcript: TranscriptCallback | None = None,
     dump_raw_audio: bool = True,
     target_language_code: str = DEFAULT_TARGET_LANGUAGE_CODE,
+    echo_target_language: bool = True,
+    on_transcript_delta: TranscriptDeltaCallback | None = None,
+    on_player_ready: Callable[[AudioPlayer], None] | None = None,
 ) -> None:
     """Open a Live translation session and run sending/receiving concurrently.
 
     Speech is translated into target_language_code (BCP-47, e.g. "en", "th").
-    The language is fixed for the lifetime of the session.
+    The language is fixed for the lifetime of the session. echo_target_language
+    is passed to build_live_config.
+
+    on_transcript_delta receives every transcription delta, and on_player_ready
+    receives the AudioPlayer once it's playing; both feed audio/health.HealthMonitor.
 
     Translated audio is played out through the audio/ package's AudioPlayer,
     targeting output_device_config (defaults to the virtual cable, matching
@@ -119,6 +142,8 @@ async def run_session(
         source_rate=RECEIVE_SAMPLE_RATE,
     )
     audio_player.start()
+    if on_player_ready is not None:
+        on_player_ready(audio_player)
 
     raw_dumper: RawAudioDumper | None = None
     if dump_raw_audio:
@@ -128,12 +153,12 @@ async def run_session(
         raw_dumper = RawAudioDumper(dump_path, sample_rate=RECEIVE_SAMPLE_RATE)
 
     try:
-        config = build_live_config(target_language_code)
+        config = build_live_config(target_language_code, echo_target_language)
         async with client.aio.live.connect(model=MODEL, config=config) as session:
             print(f"Session started with translation to {target_language_code!r}")
             send_task = asyncio.create_task(send_audio(session, audio_queue))
             receive_task = asyncio.create_task(
-                receive_responses(session, audio_player, on_transcript, raw_dumper)
+                receive_responses(session, audio_player, on_transcript, raw_dumper, on_transcript_delta)
             )
 
             done, pending = await asyncio.wait(

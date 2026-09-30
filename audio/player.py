@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 _UNDERRUN_LOG_INTERVAL_S = 5.0
 _DRAIN_MARGIN_S = 1.0  # slack added on top of the buffer's own playback time in stop()
+_STUTTER_GAP_S = 0.5  # audio resuming within this long of running dry counts as a stutter
 
 
 class AudioPlayer:
@@ -53,12 +54,44 @@ class AudioPlayer:
         self._buffer_lock = threading.Lock()
         self._underrun_count = 0
         self._last_underrun_log = 0.0
+        self._muted = False
+
+        # Health stats for audio/health.HealthMonitor, written by the callback.
+        self.device_name = ""
+        self.last_callback_at = 0.0
+        self.mid_speech_underruns = 0
+        self._had_audio = False
+        self._dry_since = 0.0
 
     @property
     def underrun_count(self) -> int:
         """How many times the callback ran dry (our buffer had no data, or
-        PortAudio itself reported an underflow) since start()."""
+        PortAudio itself reported an underflow) since start(). This includes
+        every idle callback between turns, so it isn't a stutter signal on its
+        own -- see mid_speech_underruns."""
         return self._underrun_count
+
+    @property
+    def buffered_ms(self) -> float:
+        """How far playback is behind: audio queued but not yet played."""
+        if self._stream is None:
+            return 0.0
+        with self._buffer_lock:
+            remaining = len(self._buffer)
+        return remaining / 2 / self._stream.samplerate * 1000  # mono int16
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    @muted.setter
+    def muted(self, value: bool) -> None:
+        """While muted, write() drops audio. Muting also discards what's queued,
+        so an echo loop is broken immediately rather than after the backlog plays."""
+        self._muted = value
+        if value:
+            with self._buffer_lock:
+                self._buffer.clear()
 
     def start(self) -> None:
         device = find_output_device(self._device_config)
@@ -82,6 +115,8 @@ class AudioPlayer:
             callback=self._callback,
         )
         self._stream.start()
+        self.device_name = device.name
+        self.last_callback_at = time.monotonic()  # watchdog grace until the first callback
 
         if self._debug_dump_path is not None:
             # Captures exactly what gets handed to the device, post-resample
@@ -118,6 +153,17 @@ class AudioPlayer:
             outdata[len(samples):, 0] = 0
             self._log_underrun(f"internal buffer had {len(samples)}/{frames} frames available")
 
+        # Stutter = audio ran dry and resumed within a moment. The dry spell at
+        # the end of every turn doesn't count, because no audio follows it quickly.
+        now = time.monotonic()
+        self.last_callback_at = now
+        has_audio = len(samples) == frames
+        if self._had_audio and not has_audio:
+            self._dry_since = now
+        elif has_audio and not self._had_audio and 0 < now - self._dry_since < _STUTTER_GAP_S:
+            self.mid_speech_underruns += 1
+        self._had_audio = has_audio
+
     def _log_underrun(self, reason: str) -> None:
         self._underrun_count += 1
         now = time.monotonic()
@@ -128,7 +174,9 @@ class AudioPlayer:
     def write(self, pcm_bytes: bytes) -> None:
         """Resample and append to the internal buffer; the real-time
         callback drains it at its own pace. Non-blocking (aside from a
-        brief lock), safe to call from any thread."""
+        brief lock), safe to call from any thread. Dropped while muted."""
+        if self._muted:
+            return
         samples = np.frombuffer(pcm_bytes, dtype="<i2")
         if self._resampler is not None:
             samples = self._resampler.resample_chunk(samples)
