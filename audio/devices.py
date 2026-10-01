@@ -18,10 +18,14 @@ class DeviceInfo:
     max_output_channels: int = 0
 
 
-def _list_devices(channel_key: str) -> list[DeviceInfo]:
-    wasapi_index = next(
-        i for i, api in enumerate(sd.query_hostapis()) if api["name"] == "Windows WASAPI"
+def _wasapi_hostapi() -> tuple[int, dict]:
+    return next(
+        (i, api) for i, api in enumerate(sd.query_hostapis()) if api["name"] == "Windows WASAPI"
     )
+
+
+def _list_devices(channel_key: str) -> list[DeviceInfo]:
+    wasapi_index, _ = _wasapi_hostapi()
     devices = []
     for index, entry in enumerate(sd.query_devices()):
         if entry["hostapi"] == wasapi_index and entry[channel_key] > 0:
@@ -43,6 +47,13 @@ def list_input_devices() -> list[DeviceInfo]:
 
 def list_output_devices() -> list[DeviceInfo]:
     return _list_devices("max_output_channels")
+
+
+def default_device_indices() -> tuple[int | None, int | None]:
+    """(input, output) sounddevice indices of the Windows default WASAPI devices,
+    as of when PortAudio was initialised; None where there's no default."""
+    _, api = _wasapi_hostapi()
+    return tuple(i if i >= 0 else None for i in (api["default_input_device"], api["default_output_device"]))
 
 
 def find_input_device(config: AudioDeviceConfig) -> DeviceInfo:

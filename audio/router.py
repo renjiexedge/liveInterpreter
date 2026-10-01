@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 
 import numpy as np
@@ -33,6 +34,10 @@ class AudioRouter:
         self._resampler: Resampler | None = None
         self._stream: sd.InputStream | None = None
         self._last_overflow_log = 0.0
+        # start()/stop() run on worker threads (asyncio.to_thread), and a session
+        # shutdown can call stop() while the direction's own cleanup does too, or
+        # while start() is still opening the device. The lock serialises them.
+        self._lifecycle_lock = threading.Lock()
 
         # Health stats for audio/health.HealthMonitor. Written by the callback as
         # plain int/float stores (no locking needed), read from the session loop.
@@ -47,6 +52,10 @@ class AudioRouter:
         return self.zero_run_blocks * self._pipeline_config.chunk_ms / 1000
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         device = find_input_device(self._device_config)
         native_rate = int(device.default_samplerate)
         channels = min(device.max_input_channels, 2)
@@ -97,6 +106,11 @@ class AudioRouter:
         self._jitter_buffer.put_from_thread(pcm_bytes)
 
     def stop(self) -> None:
+        """Idempotent and thread-safe. Always feeds the end-of-stream sentinel."""
+        with self._lifecycle_lock:
+            self._stop()
+
+    def _stop(self) -> None:
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()

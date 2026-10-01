@@ -171,7 +171,7 @@ async def run_session(
         dump_path = dump_dir / f"{dump_name}{datetime.now():%Y%m%d_%H%M%S}.wav"
         raw_dumper = RawAudioDumper(dump_path, sample_rate=RECEIVE_SAMPLE_RATE)
 
-    chunk_stats = ChunkStats(label)
+    chunk_stats = ChunkStats(label, player=audio_player)
     log_prefix = f"[{label}] " if label else ""
     try:
         config = build_live_config(target_language_code, echo_target_language)

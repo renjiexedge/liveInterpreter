@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 _UNDERRUN_LOG_INTERVAL_S = 5.0
 _DRAIN_MARGIN_S = 1.0  # slack added on top of the buffer's own playback time in stop()
 _STUTTER_GAP_S = 0.5  # audio resuming within this long of running dry counts as a stutter
+# Gemini keeps streaming real-time silence while nobody speaks, so the buffer
+# never gets a quiet moment to drain, and any device time lost to a stalled
+# callback stays as permanent lag. write() drops silent chunks while playback
+# is this far behind, so lag heals during pauses without touching speech.
+_SILENCE_DROP_MIN_BUFFERED_MS = 100.0
+_SILENCE_PEAK = 64  # int16 peak at or below this (about -54 dBFS) counts as silence
 
 
 class AudioPlayer:
@@ -56,6 +62,13 @@ class AudioPlayer:
         self._last_underrun_log = 0.0
         self._muted = False
 
+        # Cumulative counters for the periodic stats line (ChunkStats diffs them).
+        # Written by the callback / write(), read from the event loop for logging only.
+        self.frames_requested = 0  # frames the device asked for, padding included
+        self.portaudio_underflows = 0  # callback ran late; the device played silence
+        self.empty_buffer_underruns = 0  # callback ran on time but our buffer was short
+        self.silence_dropped_frames = 0  # silent audio write() discarded while behind
+
         # Health stats for audio/health.HealthMonitor, written by the callback.
         self.device_name = ""
         self.last_callback_at = 0.0
@@ -68,8 +81,14 @@ class AudioPlayer:
         """How many times the callback ran dry (our buffer had no data, or
         PortAudio itself reported an underflow) since start(). This includes
         every idle callback between turns, so it isn't a stutter signal on its
-        own -- see mid_speech_underruns."""
+        own -- see mid_speech_underruns. portaudio_underflows and
+        empty_buffer_underruns split it by cause."""
         return self._underrun_count
+
+    @property
+    def sample_rate(self) -> int:
+        """The device's native rate the stream runs at (0 before start())."""
+        return int(self._stream.samplerate) if self._stream is not None else 0
 
     @property
     def buffered_ms(self) -> float:
@@ -137,7 +156,9 @@ class AudioPlayer:
         """Runs on PortAudio's real-time thread. Pulls exactly `frames`
         samples from the internal buffer, padding with silence if not
         enough has arrived yet rather than blocking."""
+        self.frames_requested += frames
         if status.output_underflow:
+            self.portaudio_underflows += 1
             self._log_underrun("PortAudio reported an output underflow")
 
         needed_bytes = frames * 2  # mono int16
@@ -151,6 +172,7 @@ class AudioPlayer:
         outdata[: len(samples), 0] = samples
         if len(samples) < frames:
             outdata[len(samples):, 0] = 0
+            self.empty_buffer_underruns += 1
             self._log_underrun(f"internal buffer had {len(samples)}/{frames} frames available")
 
         # Stutter = audio ran dry and resumed within a moment. The dry spell at
@@ -174,13 +196,22 @@ class AudioPlayer:
     def write(self, pcm_bytes: bytes) -> None:
         """Resample and append to the internal buffer; the real-time
         callback drains it at its own pace. Non-blocking (aside from a
-        brief lock), safe to call from any thread. Dropped while muted."""
+        brief lock), safe to call from any thread. Dropped while muted, and
+        dropped if it's silent while playback is already behind."""
         if self._muted:
             return
         samples = np.frombuffer(pcm_bytes, dtype="<i2")
+        # Resample before any drop decision, so the resampler's stream state
+        # stays continuous.
         if self._resampler is not None:
             samples = self._resampler.resample_chunk(samples)
         if not len(samples):
+            return
+        if (
+            self.buffered_ms > _SILENCE_DROP_MIN_BUFFERED_MS
+            and int(np.abs(samples.astype(np.int32)).max()) <= _SILENCE_PEAK
+        ):
+            self.silence_dropped_frames += len(samples)
             return
         if self._dumper is not None:
             self._dumper.write(samples.tobytes())
@@ -230,4 +261,11 @@ class AudioPlayer:
             self._dumper.close()
             self._dumper = None
 
-        logger.info("AudioPlayer stopped (%d underrun(s) total)", self._underrun_count)
+        logger.info(
+            "AudioPlayer stopped (%d underrun(s) total: %d PortAudio underflow(s), "
+            "%d empty-buffer; %d silent frame(s) dropped while behind)",
+            self._underrun_count,
+            self.portaudio_underflows,
+            self.empty_buffer_underruns,
+            self.silence_dropped_frames,
+        )

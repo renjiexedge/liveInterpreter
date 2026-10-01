@@ -34,9 +34,9 @@ _ENDPOINT_WORDS = re.compile(r"\b(input|output)\b|\bin \d+ch\b", re.IGNORECASE)
 
 
 def cable_key(name: str) -> str:
-    """'CABLE-A Input (VB-Audio Cable A)' and 'CABLE-A Output (VB-Audio Cable A)'
+    """'CABLE Input (VB-Audio Virtual Cable)' and 'CABLE Output (VB-Audio Virtual Cable)'
     are two ends of one wire (as is 'CABLE In 16ch'). Strip the endpoint words to pair them.
-    Heuristic only: Voicemeeter ('Voicemeeter Input' -> 'Voicemeeter Out B1')
+    Heuristic only: Voicemeeter ('Voicemeeter AUX Input' -> 'Voicemeeter Out B2')
     routes internally and is only caught by run_loop_test."""
     return " ".join(_ENDPOINT_WORDS.sub("", name).casefold().split())
 
@@ -64,8 +64,10 @@ def validate_routing(directions: list[DirectionConfig], expected_names: dict[str
             expected = expected_names.get(f"{d.label}.{role}")
             shown = expected or _describe(config, role)
             if config.device_index is None and config.exact_name is None:
-                # The "CABLE" substring default is ambiguous once CABLE-A and CABLE-B exist.
-                issues.append(Issue(d.label, IssueCode.DEVICE_OPEN_FAILED, fields={"device": shown}))
+                # Nothing chosen. No fallback to the "CABLE" substring default: it's
+                # it matches CABLE Output, CABLE Input and CABLE In 16ch alike.
+                issues.append(Issue(d.label, IssueCode.DEVICE_NOT_SELECTED,
+                                    fields={"role": "input" if role == "capture" else "output"}))
                 continue
             try:
                 device = find(config)

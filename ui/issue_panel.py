@@ -24,12 +24,17 @@ class StatusDot(QLabel):
 
 class IssuePanel(QWidget):
     """Lists every active Issue as a message plus what to do about it. Rows are
-    grouped by (direction label, code); the panel hides itself when empty."""
+    grouped by (direction label, code); the panel hides itself when empty.
+
+    direction_names maps a direction label to the name shown at the start of its
+    rows (e.g. "A" -> "Candidate-to-staff"), since with two directions a message
+    like "Translated audio is stuttering." doesn't say which one."""
 
     resume_clicked = Signal(str)  # direction label, from an echo row's Resume button
 
-    def __init__(self):
+    def __init__(self, direction_names: dict[str, str] | None = None):
         super().__init__()
+        self._direction_names = direction_names or {}
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._rows: dict[tuple[str, IssueCode], list[tuple[Issue, QWidget]]] = {}
@@ -57,8 +62,11 @@ class IssuePanel(QWidget):
                 self._remove(key)
         self._refresh()
 
-    def worst(self) -> Severity:
-        return max((issue.level for rows in self._rows.values() for issue, _ in rows),
+    def worst(self, label: str | None = None) -> Severity:
+        """Worst active severity, over every row or only one direction's."""
+        return max((issue.level for (row_label, _), rows in self._rows.items()
+                    if label is None or row_label == label
+                    for issue, _ in rows),
                    default=Severity.OK)
 
     def _remove(self, key) -> None:
@@ -75,7 +83,9 @@ class IssuePanel(QWidget):
                             "QLabel { border: none; }")
         layout = QHBoxLayout(frame)
         text = QVBoxLayout()
-        message = QLabel(f"{_ICONS.get(issue.level, '')} {issue.message}")
+        direction = self._direction_names.get(issue.label)
+        prefix = f"{direction}: " if direction else ""
+        message = QLabel(f"{_ICONS.get(issue.level, '')} {prefix}{issue.message}")
         message.setWordWrap(True)
         message.setStyleSheet("font-weight: bold;")
         action = QLabel(issue.action)

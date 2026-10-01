@@ -31,6 +31,7 @@ class IssueCode(enum.Enum):
     DEVICE_LIST_CHANGED = "device_list_changed"
     AUDIO_TEST_FAILED = "audio_test_failed"
     DEVICE_OPEN_FAILED = "device_open_failed"
+    DEVICE_NOT_SELECTED = "device_not_selected"
     # During a session (HealthMonitor)
     INPUT_DISCONNECTED = "input_disconnected"
     OUTPUT_DISCONNECTED = "output_disconnected"
@@ -48,7 +49,7 @@ class IssueCode(enum.Enum):
 ECHO_CODES = frozenset({IssueCode.ECHO_SAME_DIRECTION, IssueCode.ECHO_LOCAL, IssueCode.ECHO_REMOTE})
 PRE_START_CODES = frozenset({
     IssueCode.ROUTING_LOOP, IssueCode.DEVICE_SHARED, IssueCode.DEVICE_LIST_CHANGED,
-    IssueCode.AUDIO_TEST_FAILED, IssueCode.DEVICE_OPEN_FAILED,
+    IssueCode.AUDIO_TEST_FAILED, IssueCode.DEVICE_OPEN_FAILED, IssueCode.DEVICE_NOT_SELECTED,
 })
 # Still shown after the session ends, so the user can see why it went wrong.
 STICKY_CODES = ECHO_CODES | {IssueCode.INPUT_DISCONNECTED, IssueCode.OUTPUT_DISCONNECTED, IssueCode.SESSION_FAILED}
@@ -87,6 +88,10 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "Couldn't open '{device}'. It may be unplugged or in use by another app in exclusive mode.",
         "Plug it in, or close the other app, then try again."),
+    IssueCode.DEVICE_NOT_SELECTED: IssueText(
+        Severity.PROBLEM,
+        "No {role} device is selected.",
+        "Choose one from the list, then press Start again."),
     IssueCode.INPUT_DISCONNECTED: IssueText(
         Severity.PROBLEM,
         "Warning: input device '{capture}' disconnected or stopped sending audio.",
