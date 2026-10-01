@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import os
 from collections.abc import Callable
 from datetime import datetime
@@ -15,12 +16,22 @@ from config.audio_config import AudioDeviceConfig
 
 load_dotenv()  # reads .env in the project root into the process environment
 
-API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-3.5-live-translate-preview" # or "gemini-3.5-live-translate-preview" for preview model
 DEFAULT_TARGET_LANGUAGE_CODE = "en"  # used when the caller doesn't pick a language
 RECEIVE_SAMPLE_RATE = 24000  # PCM16 rate Gemini streams translated audio back at
 
-client = genai.Client(api_key=API_KEY)
+
+def api_key_present() -> bool:
+    """True if GEMINI_API_KEY is set (from .env or the environment). Callers check
+    this before Start, so a missing key gets a friendly message, not a crash."""
+    return bool(os.environ.get("GEMINI_API_KEY"))
+
+
+@functools.cache
+def get_client() -> genai.Client:
+    """The shared client, built on first use rather than at import: genai.Client
+    raises without a key, and importing this module shouldn't."""
+    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
 def build_live_config(target_language_code: str, echo_target_language: bool = True) -> types.LiveConnectConfig:
@@ -78,7 +89,11 @@ async def receive_responses(
         server_content = response.server_content
         if not server_content:
             continue
-        log_interrupted(server_content.interrupted, label)
+        if server_content.interrupted:
+            # Spec §10.2: never replay audio from an interrupted response.
+            frames = audio_player.flush()
+            rate = audio_player.sample_rate
+            log_interrupted(1000 * frames / rate if rate else 0.0, label)
         if server_content.input_transcription:
             # .text can be None on some deltas (e.g. an interim/empty update).
             delta = server_content.input_transcription.text or ""
@@ -175,7 +190,7 @@ async def run_session(
     log_prefix = f"[{label}] " if label else ""
     try:
         config = build_live_config(target_language_code, echo_target_language)
-        async with client.aio.live.connect(model=MODEL, config=config) as session:
+        async with get_client().aio.live.connect(model=MODEL, config=config) as session:
             print(f"{log_prefix}Session started with translation to {target_language_code!r}")
             if on_connected is not None:
                 on_connected()

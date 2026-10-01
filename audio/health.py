@@ -40,10 +40,16 @@ class IssueCode(enum.Enum):
     AUDIO_DROPPED = "audio_dropped"
     OUTPUT_STUTTER = "output_stutter"
     OUTPUT_LAGGING = "output_lagging"
+    OUTPUT_SKIPPED = "output_skipped"
     ECHO_SAME_DIRECTION = "echo_same_direction"
     ECHO_LOCAL = "echo_local"
     ECHO_REMOTE = "echo_remote"
     SESSION_FAILED = "session_failed"
+    # Translation service (spec §8.2), raised by sessions/manager.py / app.py
+    API_KEY_MISSING = "api_key_missing"
+    SERVICE_AUTH_FAILED = "service_auth_failed"
+    NETWORK_LOST = "network_lost"
+    QUOTA_EXCEEDED = "quota_exceeded"
 
 
 ECHO_CODES = frozenset({IssueCode.ECHO_SAME_DIRECTION, IssueCode.ECHO_LOCAL, IssueCode.ECHO_REMOTE})
@@ -52,7 +58,10 @@ PRE_START_CODES = frozenset({
     IssueCode.AUDIO_TEST_FAILED, IssueCode.DEVICE_OPEN_FAILED, IssueCode.DEVICE_NOT_SELECTED,
 })
 # Still shown after the session ends, so the user can see why it went wrong.
-STICKY_CODES = ECHO_CODES | {IssueCode.INPUT_DISCONNECTED, IssueCode.OUTPUT_DISCONNECTED, IssueCode.SESSION_FAILED}
+STICKY_CODES = ECHO_CODES | {
+    IssueCode.INPUT_DISCONNECTED, IssueCode.OUTPUT_DISCONNECTED, IssueCode.SESSION_FAILED,
+    IssueCode.SERVICE_AUTH_FAILED, IssueCode.NETWORK_LOST, IssueCode.QUOTA_EXCEEDED,
+}
 
 
 @dataclass(frozen=True)
@@ -121,6 +130,11 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.WARNING,
         "Translated audio is running {seconds} s behind.",
         "It will catch up when speakers pause. If it keeps growing, press Stop and Start."),
+    IssueCode.OUTPUT_SKIPPED: IssueText(
+        Severity.WARNING,
+        "Translated audio fell more than {seconds} s behind, so some of it was skipped to catch up.",
+        "Ask the speaker to repeat anything that was missed. If it keeps happening, check your "
+        "internet connection and close other heavy apps."),
     IssueCode.ECHO_SAME_DIRECTION: IssueText(
         Severity.WARNING,
         "Echo detected: the translation played on '{playback}' is being picked up again by '{capture}'.",
@@ -139,6 +153,27 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "The translation session stopped unexpectedly: {detail}",
         "Press Start to try again. If it keeps happening, check your internet connection."),
+    # Spec §8.2 wording, adapted where the app can't do what the spec's text promises yet.
+    IssueCode.API_KEY_MISSING: IssueText(
+        Severity.PROBLEM,
+        "The translation service key is missing, so translation can't start.",
+        "Contact your administrator. (Developers: set GEMINI_API_KEY in the .env file, "
+        "then restart the app.)"),
+    IssueCode.SERVICE_AUTH_FAILED: IssueText(
+        Severity.PROBLEM,
+        "Translation service sign-in failed. Contact your administrator and quote diagnostic ID {id}.",
+        "Translation can't run until the key is fixed."),
+    # The spec says "Reconnecting; ... until Connected returns", but reconnecting is
+    # Phase 6. Until then a dropped connection ends that direction.
+    IssueCode.NETWORK_LOST: IssueText(
+        Severity.PROBLEM,
+        "Internet connection lost. Translation has stopped; do not continue sensitive questions.",
+        "Check the internet connection, then press Start again."),
+    IssueCode.QUOTA_EXCEEDED: IssueText(
+        Severity.PROBLEM,
+        "Translation service limit reached. Stop the interview and contact the administrator.",
+        "Translation has been stopped. The administrator needs to check the Gemini API quota "
+        "and billing."),
 }
 
 
@@ -309,6 +344,7 @@ class _Direction:
     clip_watch: _CounterWatch
     drop_watch: _CounterWatch
     stutter_watch: _CounterWatch
+    skip_watch: _CounterWatch
     player: object | None = None
     lagging: bool = False
 
@@ -340,6 +376,7 @@ class HealthMonitor:
             clip_watch=_CounterWatch(math.ceil(blocks_per_window * cfg.clip_ratio), cfg.window_s, cfg.clear_after_s),
             drop_watch=_CounterWatch(1, cfg.window_s, cfg.clear_after_s),
             stutter_watch=_CounterWatch(cfg.stutter_count, cfg.window_s, cfg.clear_after_s),
+            skip_watch=_CounterWatch(1, cfg.window_s, cfg.clear_after_s),
         )
 
     def player_ready(self, label: str, player) -> None:
@@ -401,6 +438,10 @@ class HealthMonitor:
                 lag_ms = player.buffered_ms
                 d.lagging = lag_ms > cfg.lag_warn_ms or (d.lagging and lag_ms >= cfg.lag_clear_ms)
                 self._set(label, IssueCode.OUTPUT_LAGGING, d.lagging, seconds=round(lag_ms / 1000))
+                cap_ms = player.max_buffered_ms
+                self._set(label, IssueCode.OUTPUT_SKIPPED,
+                          d.skip_watch.update(player.overflow_dropped_frames, now),
+                          seconds=f"{cap_ms / 1000:g}" if cap_ms else "?")
 
         # Echo rows expire on their own unless they muted the player.
         for (label, code), hits in self._echo_hits.items():

@@ -33,6 +33,7 @@ def _prefix(label: str) -> str:
 
 _PLAYER_COUNTERS = (
     "frames_requested", "portaudio_underflows", "empty_buffer_underruns", "silence_dropped_frames",
+    "overflow_dropped_frames", "flushed_frames",
 )
 
 
@@ -43,8 +44,9 @@ class ChunkStats:
     Given the session's AudioPlayer, the line also shows its playback side for
     the same window: how much device time the output stream actually pulled
     (under 100% means callbacks were lost, which turns into lag), how far
-    behind playback is, underruns split by cause, and silence dropped to
-    catch up."""
+    behind playback is, underruns split by cause, and audio dropped to keep up
+    (silence while behind, the oldest audio past the queue cap, and
+    interrupted turns)."""
 
     def __init__(self, label: str = "", interval_s: float = 5.0, player=None):
         self._label = label
@@ -75,7 +77,9 @@ class ChunkStats:
             f"behind {self._player.buffered_ms:.0f} ms, "
             f"PortAudio underflows {delta['portaudio_underflows']}, "
             f"empty-buffer underruns {delta['empty_buffer_underruns']}, "
-            f"silence dropped {1000 * delta['silence_dropped_frames'] / rate:.0f} ms"
+            f"silence dropped {1000 * delta['silence_dropped_frames'] / rate:.0f} ms, "
+            f"over cap dropped {1000 * delta['overflow_dropped_frames'] / rate:.0f} ms, "
+            f"flushed on interrupt {1000 * delta['flushed_frames'] / rate:.0f} ms"
         )
 
     def sent(self, chunk: bytes) -> None:

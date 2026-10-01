@@ -22,6 +22,10 @@ _STUTTER_GAP_S = 0.5  # audio resuming within this long of running dry counts as
 # is this far behind, so lag heals during pauses without touching speech.
 _SILENCE_DROP_MIN_BUFFERED_MS = 100.0
 _SILENCE_PEAK = 64  # int16 peak at or below this (about -54 dBFS) counts as silence
+# Spec §11 max_output_queue_ms: past this, write() drops the OLDEST queued audio,
+# so playback never runs more than this far behind (latency over completeness).
+# The backstop for lag built up during speech; silence dropping handles pauses.
+MAX_OUTPUT_QUEUE_MS = 1200.0
 
 
 class AudioPlayer:
@@ -47,8 +51,10 @@ class AudioPlayer:
         source_rate: int,
         resample_quality: str = "HQ",
         debug_dump_path: str | Path | None = None,
+        max_buffered_ms: float | None = MAX_OUTPUT_QUEUE_MS,
     ):
         self._device_config = device_config
+        self._max_buffered_ms = max_buffered_ms
         self._source_rate = source_rate
         self._resample_quality = resample_quality
         self._resampler: soxr.ResampleStream | None = None
@@ -61,6 +67,7 @@ class AudioPlayer:
         self._underrun_count = 0
         self._last_underrun_log = 0.0
         self._muted = False
+        self._user_muted = False
 
         # Cumulative counters for the periodic stats line (ChunkStats diffs them).
         # Written by the callback / write(), read from the event loop for logging only.
@@ -68,6 +75,8 @@ class AudioPlayer:
         self.portaudio_underflows = 0  # callback ran late; the device played silence
         self.empty_buffer_underruns = 0  # callback ran on time but our buffer was short
         self.silence_dropped_frames = 0  # silent audio write() discarded while behind
+        self.overflow_dropped_frames = 0  # oldest audio discarded past max_buffered_ms
+        self.flushed_frames = 0  # queued audio discarded by flush() (interrupted turns)
 
         # Health stats for audio/health.HealthMonitor, written by the callback.
         self.device_name = ""
@@ -91,6 +100,11 @@ class AudioPlayer:
         return int(self._stream.samplerate) if self._stream is not None else 0
 
     @property
+    def max_buffered_ms(self) -> float | None:
+        """The queue cap; None means unbounded."""
+        return self._max_buffered_ms
+
+    @property
     def buffered_ms(self) -> float:
         """How far playback is behind: audio queued but not yet played."""
         if self._stream is None:
@@ -105,12 +119,36 @@ class AudioPlayer:
 
     @muted.setter
     def muted(self, value: bool) -> None:
-        """While muted, write() drops audio. Muting also discards what's queued,
-        so an echo loop is broken immediately rather than after the backlog plays."""
+        """Echo circuit breaker (audio/health.HealthMonitor). While muted, write()
+        drops audio. Muting also discards what's queued, so an echo loop is broken
+        immediately rather than after the backlog plays."""
         self._muted = value
         if value:
             with self._buffer_lock:
                 self._buffer.clear()
+
+    @property
+    def user_muted(self) -> bool:
+        return self._user_muted
+
+    @user_muted.setter
+    def user_muted(self, value: bool) -> None:
+        """The staff's per-direction Mute button (spec §4.2). Same effect as
+        `muted`, but a separate flag, so the echo breaker's Resume can't unmute
+        a direction the user muted. Safe to set from any thread."""
+        self._user_muted = value
+        if value:
+            with self._buffer_lock:
+                self._buffer.clear()
+
+    def flush(self) -> int:
+        """Discard everything queued (spec §10.2: never replay audio from an
+        interrupted response). Returns how many frames were dropped."""
+        with self._buffer_lock:
+            frames = len(self._buffer) // 2  # mono int16
+            self._buffer.clear()
+        self.flushed_frames += frames
+        return frames
 
     def start(self) -> None:
         device = find_output_device(self._device_config)
@@ -197,8 +235,9 @@ class AudioPlayer:
         """Resample and append to the internal buffer; the real-time
         callback drains it at its own pace. Non-blocking (aside from a
         brief lock), safe to call from any thread. Dropped while muted, and
-        dropped if it's silent while playback is already behind."""
-        if self._muted:
+        dropped if it's silent while playback is already behind. If the queue
+        then holds more than max_buffered_ms, the oldest audio is dropped."""
+        if self._muted or self._user_muted:
             return
         samples = np.frombuffer(pcm_bytes, dtype="<i2")
         # Resample before any drop decision, so the resampler's stream state
@@ -217,6 +256,12 @@ class AudioPlayer:
             self._dumper.write(samples.tobytes())
         with self._buffer_lock:
             self._buffer.extend(samples.tobytes())
+            if self._max_buffered_ms is not None and self._stream is not None:
+                max_bytes = int(self._max_buffered_ms / 1000 * self._stream.samplerate) * 2
+                excess = len(self._buffer) - max_bytes
+                if excess > 0:
+                    del self._buffer[:excess]  # even count: stays sample-aligned
+                    self.overflow_dropped_frames += excess // 2
 
     def stop(self) -> None:
         if self._resampler is not None:
@@ -263,9 +308,12 @@ class AudioPlayer:
 
         logger.info(
             "AudioPlayer stopped (%d underrun(s) total: %d PortAudio underflow(s), "
-            "%d empty-buffer; %d silent frame(s) dropped while behind)",
+            "%d empty-buffer; dropped frames: %d silent while behind, %d over the "
+            "queue cap, %d flushed on interrupt)",
             self._underrun_count,
             self.portaudio_underflows,
             self.empty_buffer_underruns,
             self.silence_dropped_frames,
+            self.overflow_dropped_frames,
+            self.flushed_frames,
         )

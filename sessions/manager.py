@@ -12,17 +12,20 @@ direction fails, Stop is pressed, or CONNECT_TIMEOUT_S passes first, all of them
 are torn down. Until then no direction sends audio (see GatedAudio), so a direction
 that connects first can't translate or play anything that a failed start would
 then cut off. Once translating, one direction ending doesn't cancel the others
-(DEGRADED). ERROR is reported just before the final IDLE when the session ended
-because of a failure; its message says why.
+(DEGRADED), except a sign-in or quota failure, which stops the whole session
+(spec §8.2/F10: no silent fallback). ERROR is reported just before the final IDLE
+when the session ended because of a failure; its message says why.
 """
 
 import asyncio
 import enum
 import logging
 import threading
+import uuid
 from collections.abc import Callable
 
 import sounddevice as sd
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from audio.devices import DeviceNotFoundError
 from audio.health import HealthMonitor, Issue, IssueCode
@@ -78,11 +81,36 @@ class GatedAudio:
                 return chunk
 
 
-def describe_error(exc: BaseException) -> str:
-    """Staff-friendly text for a direction's failure (goes into SESSION_FAILED)."""
+# Failures that would hit every direction alike: stop the whole session.
+FATAL_CODES = frozenset({IssueCode.SERVICE_AUTH_FAILED, IssueCode.QUOTA_EXCEEDED})
+
+
+def classify_failure(label: str, exc: BaseException) -> Issue:
+    """The spec §8.2 issue for a direction's failure. The Live API reports most
+    service errors as google.genai.errors.APIError carrying a WebSocket close code
+    and the server's reason text (an invalid key is code 1007, "API key not
+    valid..."), so they're told apart by status code and text. A dropped
+    connection raises websockets' ConnectionClosed (on send), APIError 1006
+    (abnormal closure, on receive), or an OSError while connecting."""
     if isinstance(exc, (DeviceNotFoundError, sd.PortAudioError)):
-        return "an audio device couldn't be opened. It may be unplugged or in use."
-    return str(exc) or type(exc).__name__
+        return Issue(label, IssueCode.SESSION_FAILED, fields={
+            "detail": "an audio device couldn't be opened. It may be unplugged or in use."})
+    code = getattr(exc, "code", None)
+    text = str(exc).casefold()
+    if code in (401, 403) or any(word in text for word in ("api key", "permission_denied", "unauthenticated")):
+        diagnostic_id = uuid.uuid4().hex[:8].upper()
+        logger.error("[%s] Translation service sign-in failed (diagnostic ID %s): %s", label, diagnostic_id, exc)
+        return Issue(label, IssueCode.SERVICE_AUTH_FAILED, fields={"id": diagnostic_id})
+    if code == 429 or any(word in text for word in ("quota", "resource_exhausted", "rate limit")):
+        return Issue(label, IssueCode.QUOTA_EXCEEDED)
+    if isinstance(exc, (OSError, ConnectionClosed, InvalidHandshake)) or code == 1006:
+        return Issue(label, IssueCode.NETWORK_LOST)
+    return Issue(label, IssueCode.SESSION_FAILED, fields={"detail": str(exc) or type(exc).__name__})
+
+
+def describe_error(exc: BaseException) -> str:
+    """Staff-friendly text for a failure (the status line)."""
+    return classify_failure("", exc).message
 
 
 class SessionManager:
@@ -103,6 +131,11 @@ class SessionManager:
         self._stop_event: asyncio.Event | None = None
         self._monitor: HealthMonitor | None = None
         self._stop_requested = False
+        # Per-direction Mute buttons. The wanted state outlives sessions, so a mute
+        # set before Start (or before a player exists) applies once it does.
+        self._mute_wanted: dict[str, bool] = {}
+        self._players: dict[str, object] = {}
+        self._failures: dict[str, Issue] = {}
 
     # ---- GUI-thread API -------------------------------------------------
     @property
@@ -133,6 +166,15 @@ class SessionManager:
             except RuntimeError:
                 pass  # the loop closed in the meantime: the session is already ending
 
+    def set_muted(self, label: str, muted: bool) -> None:
+        """Mute button for one direction's translated audio (spec §4.2). Thread-safe:
+        AudioPlayer.user_muted only flips a flag and clears its buffer under a lock.
+        Capture and translation keep running, so transcripts continue."""
+        self._mute_wanted[label] = muted
+        player = self._players.get(label)
+        if player is not None:
+            player.user_muted = muted
+
     def resume(self, label: str) -> None:
         """'Resume audio' on an echo row (only when HealthConfig.auto_mute_on_echo is on)."""
         monitor = self._monitor
@@ -151,6 +193,7 @@ class SessionManager:
             self._loop = None
             self._stop_event = None
             self._monitor = None
+            self._players.clear()
             self._thread = None
             if error:
                 self._on_state(State.ERROR, error)
@@ -166,6 +209,7 @@ class SessionManager:
         self._monitor = monitor
         monitor_task = asyncio.create_task(monitor.run())
         self._on_state(State.CONNECTING, "")
+        self._failures.clear()
 
         routers: dict[str, object] = {}
         connected = {d.label: asyncio.Event() for d in directions}
@@ -190,7 +234,9 @@ class SessionManager:
             await self._run_until_stopped(tasks)
             self._on_state(State.STOPPING, "")
             await self._shutdown(monitor, routers, tasks)
-            return self._first_error(tasks) if len(self._failed(tasks)) == len(tasks) else ""
+            fatal = any(issue.code in FATAL_CODES for issue in self._failures.values())
+            all_failed = len(self._failed(tasks)) == len(tasks)
+            return self._first_error(tasks) if fatal or all_failed else ""
         finally:
             monitor_task.cancel()
             await asyncio.gather(monitor_task, return_exceptions=True)
@@ -239,6 +285,11 @@ class SessionManager:
             connected.set()
             self._on_direction_state(label, DirectionState.CONNECTED, "")
 
+        def on_player_ready(player) -> None:
+            self._players[label] = player
+            player.user_muted = self._mute_wanted.get(label, False)
+            monitor.player_ready(label, player)
+
         # Built here, inside the running loop: JitterBuffer binds to the current loop.
         router, jitter_buffer = build_audio_pipeline(d.capture, d.pipeline)
         try:
@@ -253,7 +304,7 @@ class SessionManager:
                 target_language_code=d.target_language_code,
                 echo_target_language=d.echo_target_language,
                 on_transcript_delta=lambda kind, text: monitor.transcript_delta(label, kind, text),
-                on_player_ready=lambda player: monitor.player_ready(label, player),
+                on_player_ready=on_player_ready,
                 label=label,
                 on_connected=on_connected,
             )
@@ -262,10 +313,13 @@ class SessionManager:
             self._on_direction_state(label, DirectionState.STOPPED, "")
             raise
         except Exception as exc:
-            message = describe_error(exc)
+            issue = classify_failure(label, exc)
+            self._failures[label] = issue
             logger.warning("[%s] Direction failed: %s", label, exc)
-            self._on_direction_state(label, DirectionState.FAILED, message)
-            self._on_issue(Issue(label, IssueCode.SESSION_FAILED, fields={"detail": message}))
+            self._on_direction_state(label, DirectionState.FAILED, issue.message)
+            self._on_issue(issue)
+            if issue.code in FATAL_CODES:
+                self._stop_event.set()  # spec F10: stop translation, no silent fallback
             raise
         finally:
             # Stops capture and feeds the end-of-stream sentinel (AudioRouter.stop is
@@ -291,7 +345,8 @@ class SessionManager:
 
     def _first_error(self, tasks: dict) -> str:
         for label in self._failed(tasks):
-            return describe_error(tasks[label].exception())
+            issue = self._failures.get(label)
+            return issue.message if issue is not None else describe_error(tasks[label].exception())
         return ""
 
     @staticmethod

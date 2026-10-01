@@ -8,11 +8,12 @@ from PySide6.QtWidgets import (QApplication, QGroupBox, QGridLayout, QHBoxLayout
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 
 from audio.devices import default_device_indices, list_input_devices, list_output_devices
-from audio.health import PRE_START_CODES, Issue, Severity
+from audio.health import PRE_START_CODES, Issue, IssueCode, Severity
 from audio.routing_check import cable_key, routing_fingerprint, run_loop_test, validate_routing
 from config.audio_config import AudioDeviceConfig
 from config.session_config import (CANDIDATE_TO_STAFF, DIRECTION_NAMES, STAFF_OUTPUT_LANGUAGE,
                                    STAFF_TO_CANDIDATE, DirectionConfig, TwoWayConfig)
+from engines.gemini_live import api_key_present
 from sessions.manager import DirectionState, SessionManager, State
 from ui.issue_panel import IssuePanel, StatusDot
 # Only needed for access to command line arguments
@@ -46,6 +47,12 @@ DEVICE_ROLES = {
     f"{CANDIDATE_TO_STAFF}.playback": ("Headset playback:", False),
     f"{STAFF_TO_CANDIDATE}.capture": ("Headset microphone:", True),
     f"{STAFF_TO_CANDIDATE}.playback": ("WhatsApp outgoing (playback):", False),
+}
+
+# Spec §4.2 mute controls: each silences one direction's translated audio only.
+MUTE_BUTTON_TEXT = {
+    CANDIDATE_TO_STAFF: "Mute Candidate Translation",  # stops translated audio to staff's headset
+    STAFF_TO_CANDIDATE: "Mute Staff Translation",      # stops translated audio sent to the candidate
 }
 
 _DIRECTION_STATUS = {
@@ -204,15 +211,22 @@ class MainWindow(QMainWindow):
         self.whatsapp_hints: dict[str, QLabel] = {}
         self.direction_dots: dict[str, StatusDot] = {}
         self.direction_status: dict[str, QLabel] = {}
+        self.mute_buttons: dict[str, QPushButton] = {}
         directions_layout = QHBoxLayout()
         for label, title in DIRECTION_TITLES.items():
             group = QGroupBox(title)
             grid = QGridLayout(group)
             dot, status = StatusDot(), QLabel("Idle.")
             self.direction_dots[label], self.direction_status[label] = dot, status
+            # Mute stays usable at all times: before Start it applies once the session runs.
+            mute = QPushButton(MUTE_BUTTON_TEXT[label])
+            mute.setCheckable(True)
+            mute.toggled.connect(lambda checked, label=label: self._on_mute_toggled(label, checked))
+            self.mute_buttons[label] = mute
             status_row = QHBoxLayout()
             status_row.addWidget(dot)
             status_row.addWidget(status, stretch=1)
+            status_row.addWidget(mute)
             grid.addLayout(status_row, 0, 0, 1, 2)
             row = 1
             for role in ("capture", "playback"):
@@ -300,6 +314,9 @@ class MainWindow(QMainWindow):
         # Set the central widget of the Window.
         self.setCentralWidget(Container)
 
+        # Fail fast: without a key no session can connect, so say so up front.
+        self._check_api_key()
+
     @staticmethod
     def _preselect(combo: QComboBox, candidates: list[str | int | None]) -> None:
         """Select the first candidate present (name prefix or device index); if
@@ -333,6 +350,9 @@ class MainWindow(QMainWindow):
 
         self.issue_panel.clear()
         self._refresh_indicator()
+        if not self._check_api_key():
+            self._set_status("Can't start: the translation service key is missing.")
+            return
         directions = self._directions()
         issues = validate_routing(directions, self._expected_names())
         if issues:
@@ -443,6 +463,20 @@ class MainWindow(QMainWindow):
         self._refresh_indicator()
         if issue.active and issue.level is Severity.PROBLEM:
             QApplication.alert(self)
+
+    def _check_api_key(self) -> bool:
+        """Show API_KEY_MISSING in the issue panel if GEMINI_API_KEY isn't set."""
+        if api_key_present():
+            return True
+        self.issue_panel.show_issue(Issue("", IssueCode.API_KEY_MISSING))
+        self._refresh_indicator()
+        return False
+
+    def _on_mute_toggled(self, label: str, muted: bool) -> None:
+        """Mute button (GUI thread). SessionManager.set_muted is thread-safe."""
+        self._manager.set_muted(label, muted)
+        self.mute_buttons[label].setText(
+            MUTE_BUTTON_TEXT[label].replace("Mute", "Unmute") if muted else MUTE_BUTTON_TEXT[label])
 
     def _resume_audio(self, label: str) -> None:
         """Resume audio button on an echo row (only shown when HealthConfig.auto_mute_on_echo is on)."""

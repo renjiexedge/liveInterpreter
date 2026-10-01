@@ -5,9 +5,9 @@ Three narrow tools, each aimed at one hypothesis from the distortion
 triage:
   - log_mime_type: confirms the rate/encoding Gemini actually reports on
     received audio, vs. the RECEIVE_SAMPLE_RATE assumption.
-  - log_interrupted: flags server-side turn interruptions, which the
-    receive loop currently doesn't handle -- stale audio from a cancelled
-    turn could be queued alongside the new turn's audio.
+  - log_interrupted: flags server-side turn interruptions and how much
+    queued audio the receive loop flushed for each (open question 6 in
+    guide/two_way_plan.md: does flushing drop valid translated speech?).
   - RawAudioDumper: writes received PCM straight to a .wav, bypassing
     resample and device playback entirely, to isolate whether corruption
     is already present in the bytes Gemini sends or introduced downstream.
@@ -41,14 +41,13 @@ def log_mime_type(mime_type: str | None, label: str = "") -> None:
     logger.info("%sReceived audio part mime_type: %r", _prefix(label), mime_type)
 
 
-def log_interrupted(interrupted: bool | None, label: str = "") -> None:
-    """Log when the server reports the current model turn was interrupted."""
-    if interrupted:
-        logger.warning(
-            "%sTurn interrupted by server (stale queued audio may still be "
-            "playing -- receive_responses does not currently clear it)",
-            _prefix(label),
-        )
+def log_interrupted(flushed_ms: float, label: str = "") -> None:
+    """Log a server-side turn interruption and how much queued audio was flushed."""
+    logger.warning(
+        "%sTurn interrupted by server: flushed %.0f ms of queued translated audio",
+        _prefix(label),
+        flushed_ms,
+    )
 
 
 class RawAudioDumper:

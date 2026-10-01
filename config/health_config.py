@@ -28,6 +28,8 @@ class HealthConfig:
     window_s: float = 5.0               # counters are judged over this window...
     clear_after_s: float = 10.0         # ...and clear after this long without growth
     stutter_count: int = 3              # mid-speech underruns within window_s
+    # Only reachable when AudioPlayer's queue cap (MAX_OUTPUT_QUEUE_MS, 1200 ms) is
+    # off or raised above it. With the cap on, OUTPUT_SKIPPED reports the drops instead.
     lag_warn_ms: float = 3000.0
     lag_clear_ms: float = 1000.0
 
