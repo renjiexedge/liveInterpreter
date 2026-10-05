@@ -243,13 +243,16 @@ stylesheet. The content is the same as `ui/live_interpreter.py`, grouped into ca
 clear order:
 
 1. **Header**: title "Live Interpreter", overall status dot and status line.
-2. **Languages card**: "Staff hears" (disabled) and "Candidate hears".
+2. **Languages card**: "Candidate hears" and "Staff hears" (disabled).
 3. **Audio devices card**: two columns, A (WhatsApp → headset) and B (headset → WhatsApp),
-   each with its capture/playback combos, WhatsApp hint and direction dot/status.
+   divided by a line. Each has its direction dot and title, its mute button, its status text,
+   and its capture/playback combos with the WhatsApp hint.
+   The mute buttons stay in their direction's column and are **always visible**: a mute set
+   before Start applies once the session runs. While muted, the button is shaded `brand.sky`.
 4. **Actions row**: Test Audio Devices (secondary) on the left; Start (primary) and Stop
    (danger) on the right.
-5. **Mute row**: per-direction mute buttons, shown while a session is running.
-6. **Issue panel**: fills the remaining height.
+5. **Issue panel**: one white row per issue with a severity-coloured left edge; hidden when empty.
+6. **Transcripts card**: one scrolling column per direction; fills the remaining height.
 
 ## 7. Implementation notes
 

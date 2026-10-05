@@ -5,8 +5,8 @@
    on load. Severity colours stay literal. */
 
 /* ---- Main window (ui/main_window.py, design.md §1) ----------------------
-   Scoped to #homeWindow so the Live Interpreter window keeps its own look
-   until it is restyled (design.md §6). */
+   Rules are scoped to #homeWindow / #interpreterWindow, so dialogs and message
+   boxes keep the native Windows look. */
 QMainWindow#homeWindow, #homeWindow QWidget {
     font-family: "Nunito Sans", "Segoe UI";
     font-size: 13px;
@@ -91,9 +91,128 @@ QMenu#profileMenu::item:selected { background: @brand-sky; }
     font-weight: 700;
 }
 
+/* ---- Live Interpreter window (ui/live_interpreter.py, design.md §6) ------ */
+QMainWindow#interpreterWindow, #interpreterWindow QWidget {
+    font-family: "Nunito Sans", "Segoe UI";
+    font-size: 13px;
+    color: @ink;
+}
+#interpreterWindow QWidget:disabled { color: @muted; }
+#interpreterCentral { background: @surface-tint; }
+QFrame#interpreterHeader {
+    background: @surface;
+    border-bottom: 1px solid @line;
+}
+#interpreterWindow QLabel[role="windowTitle"] {
+    font-family: "Be Vietnam Pro", "Segoe UI";
+    font-size: 18px;
+    font-weight: 600;
+}
+#interpreterWindow QLabel[role="statusLine"] { font-weight: 700; }
+
+/* Cards */
+#interpreterWindow QFrame[role="card"] {
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 12px;
+}
+#interpreterWindow QLabel[role="cardTitle"] {
+    font-family: "Be Vietnam Pro", "Segoe UI";
+    font-size: 15px;
+    font-weight: 600;
+}
+#interpreterWindow QFrame[role="divider"] { background: @line; border: none; }
+#interpreterWindow QLabel[role="directionTitle"],
+#interpreterWindow QLabel[role="columnTitle"] { font-weight: 700; }
+#interpreterWindow QLabel[role="directionStatus"] { color: @ink-soft; }
+
+/* Buttons: secondary by default; one primary (Start) and one danger (Stop) */
+#interpreterWindow QPushButton {
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-weight: 700;
+}
+#interpreterWindow QPushButton:hover   { border-color: @ink-soft; }
+#interpreterWindow QPushButton:pressed { background: @surface-tint; }
+#interpreterWindow QPushButton:focus   { border: 2px solid @brand-orange; }
+#interpreterWindow QPushButton:disabled {
+    background: @surface-tint;
+    border-color: @line;
+    color: @muted;
+}
+#interpreterWindow QPushButton[variant="primary"] {
+    background: @brand-orange;
+    border-color: @brand-orange;
+}
+#interpreterWindow QPushButton[variant="primary"]:hover {
+    background: @brand-orange-hover;
+    border-color: @brand-orange-hover;
+}
+#interpreterWindow QPushButton[variant="primary"]:focus { border: 2px solid @ink; }
+#interpreterWindow QPushButton[variant="danger"] {
+    border-color: #c62828;
+    color: #c62828;
+}
+#interpreterWindow QPushButton[variant="primary"]:disabled,
+#interpreterWindow QPushButton[variant="danger"]:disabled {
+    background: @surface-tint;
+    border-color: @line;
+    color: @muted;
+}
+/* Mute, while muted: shaded, so a muted direction is visible at a glance */
+#interpreterWindow QPushButton[role="mute"]:checked {
+    background: @brand-sky;
+    border-color: @ink-soft;
+}
+
+/* Combos */
+#interpreterWindow QComboBox {
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 6px 10px;
+    min-height: 18px;
+}
+#interpreterWindow QComboBox:hover { border-color: @ink-soft; }
+#interpreterWindow QComboBox:focus { border: 2px solid @brand-orange; }
+#interpreterWindow QComboBox:disabled { background: @surface-tint; }
+#interpreterWindow QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 24px;
+    border: none;
+}
+#interpreterWindow QComboBox::down-arrow { image: url(@assets/icons/chevron-down.svg); width: 12px; height: 12px; }
+#interpreterWindow QComboBox::down-arrow:disabled { image: url(@assets/icons/chevron-down-disabled.svg); }
+#interpreterWindow QComboBox QAbstractItemView {
+    background: @surface;
+    border: 1px solid @line;
+    outline: 0;
+    selection-background-color: @brand-sky;
+    selection-color: @ink;
+}
+
+/* Transcripts */
+#interpreterWindow QScrollArea {
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 8px;
+}
+#interpreterWindow QWidget#transcriptList { background: @surface; }
+#interpreterWindow QLabel[role="transcriptPair"] {
+    padding: 6px 4px;
+    border-bottom: 1px solid @line;
+}
+
 /* WhatsApp "use the other end of the wire" hints under the device combos. */
 QLabel[role="hint"] {
-    font-style: italic;
+    /* font-style: italic; */
+}
+#interpreterWindow QLabel[role="hint"] {
+    font-size: 12px;
+    color: @ink-soft;
 }
 
 /* Audio health dot (ui/issue_panel.py StatusDot). */
@@ -107,6 +226,9 @@ QLabel#statusDot[severity="problem"] { color: #c62828; }
 /* One row per active Issue in the issue panel. */
 QFrame#issueRow {
     padding-left: 6px;
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 8px;
 }
 QFrame#issueRow[severity="ok"]      { border-left: 4px solid #2e7d32; }
 QFrame#issueRow[severity="warning"] { border-left: 4px solid #f9a825; }

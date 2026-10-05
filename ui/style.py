@@ -19,9 +19,16 @@ def load_fonts() -> None:
         QFontDatabase.addApplicationFont(str(path))
 
 
+# QSS url() paths resolve against the working directory, not the .qss file, so
+# image rules use url(@assets/...) and get an absolute path.
+_PATH_TOKENS = {"assets": Path(__file__).with_name("assets").as_posix()}
+
+
 def _render(text: str) -> str:
-    """Replace @token references with ui/theme.TOKENS values; unknown ones are left as-is."""
-    return _TOKEN.sub(lambda m: TOKENS.get(m.group(1), m.group(0)), text)
+    """Replace @token references with ui/theme.TOKENS values (or asset paths);
+    unknown ones are left as-is."""
+    tokens = TOKENS | _PATH_TOKENS
+    return _TOKEN.sub(lambda m: tokens.get(m.group(1), m.group(0)), text)
 
 
 def apply_stylesheet(app: QApplication, watch: bool = False) -> None:

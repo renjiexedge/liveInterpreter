@@ -3,9 +3,12 @@ import logging
 import sys
 import threading
 
-from PySide6.QtWidgets import (QApplication, QGroupBox, QGridLayout, QHBoxLayout, QPushButton, QWidget,
+from pathlib import Path
+
+from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QPushButton, QWidget,
                                QMainWindow, QLabel, QVBoxLayout, QComboBox, QScrollArea, QMessageBox)
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
+from PySide6.QtGui import QIcon
 
 from audio.devices import default_device_indices, list_input_devices, list_output_devices
 from audio.health import PRE_START_CODES, Issue, IssueCode, Severity
@@ -17,7 +20,30 @@ from engines.gemini_live import api_key_present
 from sessions.manager import DirectionState, SessionManager, State
 from ui.issue_panel import IssuePanel, StatusDot
 from ui.style import apply_stylesheet
-# Only needed for access to command line arguments
+
+WINDOW_ICON_PATH = Path(__file__).with_name("assets") / "logo_square.png"
+
+
+def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
+    """A titled white card (QFrame[role="card"] in ui/style.qss). Returns the card
+    and the layout to put its contents in."""
+    card = QFrame()
+    card.setProperty("role", "card")
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(16, 12, 16, 16)
+    layout.setSpacing(10)
+    heading = QLabel(title)
+    heading.setProperty("role", "cardTitle")
+    layout.addWidget(heading)
+    return card, layout
+
+
+def _divider() -> QFrame:
+    """Thin vertical line between the two direction columns."""
+    line = QFrame()
+    line.setProperty("role", "divider")
+    line.setFixedWidth(1)
+    return line
 
 # Southeast Asian languages: display name -> BCP-47 language code
 SOUTHEAST_ASIA_LANGUAGES = {
@@ -180,14 +206,14 @@ class LiveInterpreterWindow(QMainWindow):
         # window closes itself then. Read by ui/main_window.py.
         self.close_pending = False
 
-        # Set the window title
+        # Styled by the #interpreterWindow rules in ui/style.qss (design.md §6).
+        self.setObjectName("interpreterWindow")
         self.setWindowTitle("Xedge Live Interpreter")
+        self.setWindowIcon(QIcon(str(WINDOW_ICON_PATH)))
         # Set the window dimensions (16:10) for a good default size
-        self.setMinimumSize(QSize(1120, 700))
+        self.setMinimumSize(QSize(1120, 760))
 
-        #App header: title, then the language each side hears.
-        header_label_1 = QLabel("Xedge Live Interpreter")
-        header_label_1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Languages: the language each side hears.
         candidate_label = QLabel("Candidate hears:")
         candidate_combo = QComboBox()
         # Restrict selection to the dropdown only; user cannot type/edit the contents.
@@ -202,16 +228,19 @@ class LiveInterpreterWindow(QMainWindow):
         self.staff_language_combo = QComboBox()
         self.staff_language_combo.addItem("English", STAFF_OUTPUT_LANGUAGE)
         self.staff_language_combo.setEnabled(False)
-        header_layout = QHBoxLayout()
-        header_layout.addWidget(header_label_1)
-        header_layout.addStretch()
-        header_layout.addWidget(candidate_label)
-        header_layout.addWidget(candidate_combo)
-        header_layout.addWidget(staff_label)
-        header_layout.addWidget(self.staff_language_combo)
+        languages_card, languages_body = _card("Languages")
+        languages_row = QHBoxLayout()
+        languages_row.setSpacing(12)
+        languages_row.addWidget(candidate_label)
+        languages_row.addWidget(candidate_combo, stretch=1)
+        languages_row.addSpacing(24)
+        languages_row.addWidget(staff_label)
+        languages_row.addWidget(self.staff_language_combo, stretch=1)
+        languages_body.addLayout(languages_row)
 
-        # One group per direction: status dot + text, and its two devices.
-        # Item data in each device combo holds the sounddevice index.
+        # Audio devices: one column per direction with its status dot + text,
+        # mute button and two devices. Item data in each device combo holds the
+        # sounddevice index.
         inputs, outputs = list_input_devices(), list_output_devices()
         preselect = _preselect_candidates(inputs, outputs)
         self.device_combos: dict[str, QComboBox] = {}
@@ -220,23 +249,36 @@ class LiveInterpreterWindow(QMainWindow):
         self.direction_dots: dict[str, StatusDot] = {}
         self.direction_status: dict[str, QLabel] = {}
         self.mute_buttons: dict[str, QPushButton] = {}
+        devices_card, devices_body = _card("Audio devices")
         directions_layout = QHBoxLayout()
-        for label, title in DIRECTION_TITLES.items():
-            group = QGroupBox(title)
-            grid = QGridLayout(group)
+        directions_layout.setSpacing(24)
+        devices_body.addLayout(directions_layout)
+        for i, (label, title) in enumerate(DIRECTION_TITLES.items()):
+            if i:
+                directions_layout.addWidget(_divider())
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(8)
+            directions_layout.addLayout(grid, stretch=1)
+            direction_title = QLabel(title)
+            direction_title.setProperty("role", "directionTitle")
+            direction_title.setWordWrap(True)  # shares its row with the mute button
             dot, status = StatusDot(), QLabel("Idle.")
+            status.setProperty("role", "directionStatus")
             self.direction_dots[label], self.direction_status[label] = dot, status
             # Mute stays usable at all times: before Start it applies once the session runs.
             mute = QPushButton(MUTE_BUTTON_TEXT[label])
+            mute.setProperty("role", "mute")
             mute.setCheckable(True)
             mute.toggled.connect(lambda checked, label=label: self._on_mute_toggled(label, checked))
             self.mute_buttons[label] = mute
-            status_row = QHBoxLayout()
-            status_row.addWidget(dot)
-            status_row.addWidget(status, stretch=1)
-            status_row.addWidget(mute)
-            grid.addLayout(status_row, 0, 0, 1, 2)
-            row = 1
+            title_row = QHBoxLayout()
+            title_row.addWidget(dot)
+            title_row.addWidget(direction_title, stretch=1)
+            title_row.addWidget(mute)
+            grid.addLayout(title_row, 0, 0, 1, 2)
+            grid.addWidget(status, 1, 0, 1, 2)
+            row = 2
             for role in ("capture", "playback"):
                 key = f"{label}.{role}"
                 role_label, is_input = DEVICE_ROLES[key]
@@ -260,21 +302,45 @@ class LiveInterpreterWindow(QMainWindow):
                         lambda _=None, key=key: self._update_whatsapp_hint(key, inputs, outputs))
                     self._update_whatsapp_hint(key, inputs, outputs)
             grid.setColumnStretch(1, 1)
-            directions_layout.addWidget(group)
+            grid.setRowStretch(row, 1)  # keep both columns top-aligned
 
-        # Audio health indicator: a dot for the worst active issue, a status line,
-        # and the issue panel listing each problem with what to do about it.
+        # Header: title, plus the audio health indicator (a dot for the worst
+        # active issue and the status line).
+        self.status_dot = StatusDot()
+        self.status_label = QLabel("Ready. Press Test Audio Devices or Start.")
+        self.status_label.setProperty("role", "statusLine")
+        header = QFrame()
+        header.setObjectName("interpreterHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 12, 16, 12)
+        title = QLabel("Live Interpreter")
+        title.setProperty("role", "windowTitle")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        header_layout.addWidget(self.status_dot)
+        header_layout.addWidget(self.status_label)
+
+        # Actions: Test Audio Devices on the left; Start and Stop on the right.
         self.audio_test_button = QPushButton("Test Audio Devices")
         self.audio_test_button.setToolTip(
             "Plays a short test sound on every output, including into WhatsApp. "
             "Run it before the call starts: during a call the candidate would hear it.")
         self.audio_test_button.clicked.connect(self.test_audio_devices)
-        self.status_dot = StatusDot()
-        self.status_label = QLabel("Ready. Press Test Audio Devices or Start.")
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(self.status_dot)
-        status_layout.addWidget(self.status_label, stretch=1)
-        status_layout.addWidget(self.audio_test_button)
+        self.start_button = QPushButton("Start Live Translation")
+        self.start_button.setProperty("variant", "primary")
+        self.stop_button = QPushButton("Stop Live Translation")
+        self.stop_button.setProperty("variant", "danger")
+        self.stop_button.setEnabled(False)
+        self.start_button.clicked.connect(self.start_live_translation)
+        self.stop_button.clicked.connect(self.stop_live_translation)
+        actions_layout = QHBoxLayout()
+        actions_layout.addWidget(self.audio_test_button)
+        actions_layout.addStretch()
+        actions_layout.addWidget(self.start_button)
+        actions_layout.addWidget(self.stop_button)
+
+        # The issue panel lists each problem with what to do about it; it hides
+        # itself while there are none.
         self.issue_panel = IssuePanel(direction_names=DIRECTION_NAMES)
         self.issue_panel.resume_clicked.connect(self._resume_audio)
 
@@ -283,12 +349,16 @@ class LiveInterpreterWindow(QMainWindow):
         # as it arrives.
         self.transcript_layouts: dict[str, QVBoxLayout] = {}
         self.transcript_scrolls: dict[str, QScrollArea] = {}
+        transcripts_card, transcripts_body = _card("Transcripts")
         transcripts_layout = QHBoxLayout()
+        transcripts_layout.setSpacing(16)
+        transcripts_body.addLayout(transcripts_layout, stretch=1)
         for label in DIRECTION_TITLES:
             layout = QVBoxLayout()
             layout.addStretch()
             layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             container = QWidget()
+            container.setObjectName("transcriptList")
             container.setLayout(layout)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
@@ -296,34 +366,33 @@ class LiveInterpreterWindow(QMainWindow):
             scroll.setWidget(container)
             self.transcript_layouts[label], self.transcript_scrolls[label] = layout, scroll
             column = QVBoxLayout()
-            column.addWidget(QLabel(f"{DIRECTION_NAMES[label]} transcript"))
+            column_title = QLabel(f"{DIRECTION_NAMES[label]} transcript")
+            column_title.setProperty("role", "columnTitle")
+            column.addWidget(column_title)
             column.addWidget(scroll, stretch=1)
             transcripts_layout.addLayout(column)
 
-        #Bottom row of App for start/stop buttons for the live translation session.
-        footer_layout = QHBoxLayout()
-        self.start_button = QPushButton("Start Live Translation")
-        self.stop_button = QPushButton("Stop Live Translation")
-        self.stop_button.setEnabled(False)
-        self.start_button.clicked.connect(self.start_live_translation)
-        self.stop_button.clicked.connect(self.stop_live_translation)
-        footer_layout.addWidget(self.start_button)
-        footer_layout.addWidget(self.stop_button)
+        # Final layout: header, then the cards in order (design.md §6).
+        content = QVBoxLayout()
+        content.setContentsMargins(16, 16, 16, 16)
+        content.setSpacing(12)
+        content.addWidget(languages_card)
+        content.addWidget(devices_card)
+        content.addLayout(actions_layout)
+        content.addWidget(self.issue_panel)
+        content.addWidget(transcripts_card, stretch=1)
 
-        #Final layout for the app window.
-        layout = QVBoxLayout()
-        layout.addLayout(header_layout)
-        layout.addLayout(directions_layout)
-        layout.addLayout(status_layout)
-        layout.addWidget(self.issue_panel)
-        layout.addLayout(transcripts_layout, stretch=1)
-        layout.addLayout(footer_layout)
-
-        Container = QWidget()
-        Container.setLayout(layout)
-
-        # Set the central widget of the Window.
-        self.setCentralWidget(Container)
+        central = QWidget()
+        central.setObjectName("interpreterCentral")
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(header)
+        layout.addLayout(content, stretch=1)
+        self.setCentralWidget(central)
+        # Start with nothing focused: a focus ring at launch looks like a selection.
+        central.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        central.setFocus()
 
         # Fail fast: without a key no session can connect, so say so up front.
         self._check_api_key()
@@ -607,6 +676,7 @@ class LiveInterpreterWindow(QMainWindow):
         label = QLabel(f"{pair.get('input', '')}\n→ {pair.get('output', '')}")
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        label.setProperty("role", "transcriptPair")
         # Insert before the trailing stretch so new labels stack top-to-bottom.
         layout.insertWidget(layout.count() - 1, label)
 
