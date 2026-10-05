@@ -16,6 +16,7 @@ from config.session_config import (CANDIDATE_TO_STAFF, DIRECTION_NAMES, STAFF_OU
 from engines.gemini_live import api_key_present
 from sessions.manager import DirectionState, SessionManager, State
 from ui.issue_panel import IssuePanel, StatusDot
+from ui.style import apply_stylesheet
 # Only needed for access to command line arguments
 
 # Southeast Asian languages: display name -> BCP-47 language code
@@ -146,7 +147,7 @@ class MainWindow(QMainWindow):
     direction_state_changed = Signal(str, str, str)
     # audio.health.Issue raised/updated/cleared by the session's HealthMonitor.
     health_changed = Signal(object)
-    # (fingerprint, start_after, list[Issue]) from the loop-test worker thread.
+    # (fingerprint, start_after, partial, list[Issue]) from the loop-test worker thread.
     loop_test_finished = Signal(object)
 
     def __init__(self):
@@ -171,6 +172,10 @@ class MainWindow(QMainWindow):
         self._loop_test_running = False
         # Device combinations that passed the loop test; Start requires one.
         self._passed_fingerprints: set[frozenset] = set()
+        # ...or passed the Start-triggered test, which doesn't play into the
+        # WhatsApp outgoing route (that would play the test sound to the
+        # candidate mid-call). Start allows these, with LOOP_TEST_PARTIAL shown.
+        self._partial_fingerprints: set[frozenset] = set()
 
         # Set the window title
         self.setWindowTitle("Xedge Live Interpreter")
@@ -244,7 +249,7 @@ class MainWindow(QMainWindow):
                 if key in (f"{CANDIDATE_TO_STAFF}.capture", f"{STAFF_TO_CANDIDATE}.playback"):
                     hint = QLabel()
                     hint.setWordWrap(True)
-                    hint.setStyleSheet("font-style: italic;")
+                    hint.setProperty("role", "hint")
                     self.whatsapp_hints[key] = hint
                     grid.addWidget(hint, row, 1)
                     row += 1
@@ -257,6 +262,9 @@ class MainWindow(QMainWindow):
         # Audio health indicator: a dot for the worst active issue, a status line,
         # and the issue panel listing each problem with what to do about it.
         self.audio_test_button = QPushButton("Test Audio Devices")
+        self.audio_test_button.setToolTip(
+            "Plays a short test sound on every output, including into WhatsApp. "
+            "Run it before the call starts: during a call the candidate would hear it.")
         self.audio_test_button.clicked.connect(self.test_audio_devices)
         self.status_dot = StatusDot()
         self.status_label = QLabel("Ready. Press Test Audio Devices or Start.")
@@ -358,7 +366,13 @@ class MainWindow(QMainWindow):
         if issues:
             self._show_pre_start_issues(issues, "Can't start: fix the audio setup below.")
             return  # hard gate: never start with a known loop
-        if routing_fingerprint(self._expected_names()) not in self._passed_fingerprints:
+        fingerprint = routing_fingerprint(self._expected_names())
+        if fingerprint in self._partial_fingerprints and fingerprint not in self._passed_fingerprints:
+            # Started without playing into the call: say what wasn't tested.
+            self.issue_panel.add_issue(Issue(STAFF_TO_CANDIDATE, IssueCode.LOOP_TEST_PARTIAL, fields={
+                "playback": self._expected_names()[f"{STAFF_TO_CANDIDATE}.playback"]}))
+            self._refresh_indicator()
+        elif fingerprint not in self._passed_fingerprints:
             self._run_loop_test(start_after=True)  # starts the session only on a pass
             return
 
@@ -387,22 +401,28 @@ class MainWindow(QMainWindow):
             self._show_pre_start_issues(issues, "Fix the audio setup below, then test again.")
             return
         fingerprint = routing_fingerprint(self._expected_names())
+        # Start may run while the WhatsApp call is already going: never play the
+        # test sound into the outgoing route then. Only the Test Audio Devices
+        # button (meant for before the call) tests that route.
+        skip = frozenset({STAFF_TO_CANDIDATE}) if start_after else frozenset()
         self._loop_test_running = True
         self._set_controls_locked(True)  # the test owns the devices until it finishes
-        self._set_status("Checking audio… you should hear a short test sound on each output.")
+        self._set_status("Checking audio… you should hear a short test sound in the headset." if skip else
+                         "Checking audio… you should hear a short test sound on each output.")
         threading.Thread(
-            target=lambda: self.loop_test_finished.emit((fingerprint, start_after, run_loop_test(directions))),
+            target=lambda: self.loop_test_finished.emit(
+                (fingerprint, start_after, bool(skip), run_loop_test(directions, skip_playbacks=skip))),
             daemon=True,
         ).start()
 
     def _on_loop_test_finished(self, result) -> None:
-        fingerprint, start_after, issues = result
+        fingerprint, start_after, partial, issues = result
         self._loop_test_running = False
         self._set_controls_locked(False)
         if issues:
             self._show_pre_start_issues(issues, "Audio test failed: fix the audio setup below.")
             return
-        self._passed_fingerprints.add(fingerprint)
+        (self._partial_fingerprints if partial else self._passed_fingerprints).add(fingerprint)
         # A pass supersedes any earlier failed check: drop those rows so the dot
         # goes back to green (it shows the worst issue left in the panel).
         self.issue_panel.clear(PRE_START_CODES)
@@ -572,6 +592,7 @@ class MainWindow(QMainWindow):
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 app = QApplication(sys.argv)
+apply_stylesheet(app, watch=True)  # watch: live-reload ui/style.qss on save
 
 # Create a Qt widget, which will be our window.
 window = MainWindow()

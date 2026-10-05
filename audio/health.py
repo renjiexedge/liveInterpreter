@@ -30,6 +30,7 @@ class IssueCode(enum.Enum):
     DEVICE_SHARED = "device_shared"
     DEVICE_LIST_CHANGED = "device_list_changed"
     AUDIO_TEST_FAILED = "audio_test_failed"
+    LOOP_TEST_PARTIAL = "loop_test_partial"
     DEVICE_OPEN_FAILED = "device_open_failed"
     DEVICE_NOT_SELECTED = "device_not_selected"
     # During a session (HealthMonitor)
@@ -56,6 +57,7 @@ ECHO_CODES = frozenset({IssueCode.ECHO_SAME_DIRECTION, IssueCode.ECHO_LOCAL, Iss
 PRE_START_CODES = frozenset({
     IssueCode.ROUTING_LOOP, IssueCode.DEVICE_SHARED, IssueCode.DEVICE_LIST_CHANGED,
     IssueCode.AUDIO_TEST_FAILED, IssueCode.DEVICE_OPEN_FAILED, IssueCode.DEVICE_NOT_SELECTED,
+    IssueCode.LOOP_TEST_PARTIAL,
 })
 # Still shown after the session ends, so the user can see why it went wrong.
 STICKY_CODES = ECHO_CODES | {
@@ -93,6 +95,10 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         "Translations would repeat in a loop.",
         "Check Windows 'Listen to this device', Voicemeeter routing, and that speakers "
         "aren't near the microphone. Use a headset."),
+    IssueCode.LOOP_TEST_PARTIAL: IssueText(
+        Severity.WARNING,
+        "'{playback}' wasn't checked for audio loops, so the test sound didn't play into the call.",
+        "Before the next call, press Test Audio Devices. During this call, watch for echo warnings."),
     IssueCode.DEVICE_OPEN_FAILED: IssueText(
         Severity.PROBLEM,
         "Couldn't open '{device}'. It may be unplugged or in use by another app in exclusive mode.",

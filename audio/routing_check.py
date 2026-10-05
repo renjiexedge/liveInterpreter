@@ -162,11 +162,17 @@ def peak_ncc(recorded: np.ndarray, clip: np.ndarray, min_rms: float = 0.0) -> fl
     return float(np.max(np.abs(corr[usable] / denom[usable])))
 
 
-def run_loop_test(directions: list[DirectionConfig], config: LoopTestConfig | None = None) -> list[Issue]:
+def run_loop_test(directions: list[DirectionConfig], config: LoopTestConfig | None = None,
+                  skip_playbacks: frozenset[str] = frozenset()) -> list[Issue]:
     """Spec §6.3. Records every capture device once in silence (baseline), then
     once per playback device while the clip plays on it. A capture whose
     correlation with the clip is high, and well above its baseline, hears that
-    playback: a loop or bleed. Blocking; never call it on the GUI thread."""
+    playback: a loop or bleed. Blocking; never call it on the GUI thread.
+
+    skip_playbacks: direction labels whose playback device must NOT play the
+    clip. Used when Start runs the test during a call, where playing into the
+    WhatsApp outgoing route would play the test sound to the candidate. Those
+    devices go untested; the caller is responsible for saying so."""
     config = config or LoopTestConfig()
     clip = load_test_clip(config)
     issues: list[Issue] = []
@@ -187,6 +193,9 @@ def run_loop_test(directions: list[DirectionConfig], config: LoopTestConfig | No
     try:
         baseline = _record(captures, seconds, None, clip)
         for play_label, play_device in playbacks.items():
+            if play_label in skip_playbacks:
+                logger.info("Loop test: skipped playback %r (not played into a live call)", play_device.name)
+                continue
             heard = _record(captures, seconds, (play_label, play_device), clip)
             for cap_label, cap_device in captures.items():
                 base = peak_ncc(baseline[cap_label], clip, config.min_rms)
