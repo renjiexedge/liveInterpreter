@@ -1,7 +1,7 @@
 """SessionManager: runs every translation direction of a session on ONE background
 thread with ONE asyncio loop (Qt's event loop isn't asyncio, see CLAUDE.md).
 
-Qt-agnostic: it reports through plain callbacks, which app.py points at Qt
+Qt-agnostic: it reports through plain callbacks, which ui/live_interpreter.py points at Qt
 Signal.emit (safe to call from this thread). Works on a list of DirectionConfig,
 so the one-way app passes one direction and two-way passes two.
 

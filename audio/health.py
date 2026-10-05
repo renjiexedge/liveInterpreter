@@ -46,7 +46,7 @@ class IssueCode(enum.Enum):
     ECHO_LOCAL = "echo_local"
     ECHO_REMOTE = "echo_remote"
     SESSION_FAILED = "session_failed"
-    # Translation service (spec §8.2), raised by sessions/manager.py / app.py
+    # Translation service (spec §8.2), raised by sessions/manager.py / ui/live_interpreter.py
     API_KEY_MISSING = "api_key_missing"
     SERVICE_AUTH_FAILED = "service_auth_failed"
     NETWORK_LOST = "network_lost"
