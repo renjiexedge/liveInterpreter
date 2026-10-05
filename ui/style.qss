@@ -1,0 +1,117 @@
+/* App-wide stylesheet, loaded by ui/style.py:apply_stylesheet().
+   Selectors: type (QPushButton) for defaults, #objectName for one-off widgets,
+   [property="value"] for groups and states set via widget.setProperty().
+   @name values are colour tokens from ui/theme.py (design.md §2), substituted
+   on load. Severity colours stay literal. */
+
+/* ---- Main window (ui/main_window.py, design.md §1) ----------------------
+   Scoped to #homeWindow so the Live Interpreter window keeps its own look
+   until it is restyled (design.md §6). */
+QMainWindow#homeWindow, #homeWindow QWidget {
+    font-family: "Nunito Sans", "Segoe UI";
+    font-size: 13px;
+    color: @ink;
+}
+#homeCentral {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 @surface, stop:1 @surface-tint);
+}
+#homeContent, #homeHeader QLabel {
+    background: transparent;
+}
+QFrame#homeHeader {
+    background: @surface;
+    border-bottom: 1px solid @line;
+}
+
+/* Report a bug */
+#homeHeader QPushButton[role="pill"] {
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 16px;
+    min-height: 30px;
+    padding: 0 14px;
+    font-weight: 700;
+}
+#homeHeader QPushButton[role="pill"]:hover   { border-color: @brand-orange; }
+#homeHeader QPushButton[role="pill"]:pressed { background: @surface-tint; }
+#homeHeader QPushButton[role="pill"]:focus   { border: 2px solid @brand-orange; }
+
+/* Profile: avatar + name, no border */
+QPushButton#profileButton {
+    background: transparent;
+    border: none;
+    border-radius: 20px;
+}
+QPushButton#profileButton:hover, QPushButton#profileButton:pressed { background: @surface-tint; }
+QPushButton#profileButton::menu-indicator { image: none; width: 0; }
+#homeWindow QLabel#avatar {
+    background: @brand-sky;
+    border-radius: 16px;
+    font-weight: 700;
+    font-size: 12px;
+}
+#homeWindow QLabel[role="profileName"] { font-weight: 700; }
+QMenu#profileMenu {
+    background: @surface;
+    border: 1px solid @line;
+    padding: 4px;
+}
+QMenu#profileMenu::item { padding: 6px 20px; border-radius: 6px; color: @ink; }
+QMenu#profileMenu::item:selected { background: @brand-sky; }
+
+/* Feature buttons: TransGull-style pills */
+#homeWindow QPushButton[role="feature"] {
+    background: @surface;
+    border: 1px solid @line;
+    border-radius: 26px;
+}
+#homeWindow QPushButton[role="feature"]:hover   { border-color: @brand-orange; }
+#homeWindow QPushButton[role="feature"]:pressed { background: @surface-tint; }
+#homeWindow QPushButton[role="feature"]:focus   { border: 2px solid @brand-orange; }
+#homeWindow QLabel[role="featureLabel"] {
+    font-family: "Be Vietnam Pro", "Segoe UI";
+    font-size: 14px;
+    font-weight: 600;
+    background: transparent;
+}
+#homeWindow QLabel[role="openDot"] {
+    color: @brand-aqua;
+    font-size: 10px;
+    background: transparent;
+}
+
+/* Feature not built yet: disabled, with a "Coming soon" tag */
+#homeWindow QPushButton[role="feature"][state="soon"] { background: @surface-tint; }
+#homeWindow QPushButton[state="soon"] QLabel[role="featureLabel"] { color: @ink-soft; }
+#homeWindow QLabel[role="soonPill"] {
+    background: @brand-aqua;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+/* WhatsApp "use the other end of the wire" hints under the device combos. */
+QLabel[role="hint"] {
+    font-style: italic;
+}
+
+/* Audio health dot (ui/issue_panel.py StatusDot). */
+QLabel#statusDot {
+    font-size: 18px;
+}
+QLabel#statusDot[severity="ok"]      { color: #2e7d32; }
+QLabel#statusDot[severity="warning"] { color: #f9a825; }
+QLabel#statusDot[severity="problem"] { color: #c62828; }
+
+/* One row per active Issue in the issue panel. */
+QFrame#issueRow {
+    padding-left: 6px;
+}
+QFrame#issueRow[severity="ok"]      { border-left: 4px solid #2e7d32; }
+QFrame#issueRow[severity="warning"] { border-left: 4px solid #f9a825; }
+QFrame#issueRow[severity="problem"] { border-left: 4px solid #c62828; }
+
+QLabel[role="issueMessage"] {
+    font-weight: bold;
+}

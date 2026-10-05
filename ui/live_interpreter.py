@@ -4,7 +4,7 @@ import sys
 import threading
 
 from PySide6.QtWidgets import (QApplication, QGroupBox, QGridLayout, QHBoxLayout, QPushButton, QWidget,
-                               QMainWindow, QLabel, QVBoxLayout, QComboBox, QScrollArea)
+                               QMainWindow, QLabel, QVBoxLayout, QComboBox, QScrollArea, QMessageBox)
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 
 from audio.devices import default_device_indices, list_input_devices, list_output_devices
@@ -134,8 +134,8 @@ def whatsapp_hint(key: str, device_name: str, inputs, outputs) -> str:
     return f"'{device_name}' isn't a virtual cable, so WhatsApp can't be connected to it."
 
 
-# Subclass QMainWindow to customize your application's main window
-class MainWindow(QMainWindow):
+# The Live Interpreter feature window, opened from ui/main_window.py.
+class LiveInterpreterWindow(QMainWindow):
     # The signals below are emitted from sessions.manager.SessionManager's
     # background asyncio thread. Qt signals are safe to emit from a non-GUI
     # thread; the connected slots always run on the GUI thread.
@@ -176,6 +176,9 @@ class MainWindow(QMainWindow):
         # WhatsApp outgoing route (that would play the test sound to the
         # candidate mid-call). Start allows these, with LOOP_TEST_PARTIAL shown.
         self._partial_fingerprints: set[frozenset] = set()
+        # Set when closing waits for the session (or loop test) to finish; the
+        # window closes itself then. Read by ui/main_window.py.
+        self.close_pending = False
 
         # Set the window title
         self.setWindowTitle("Xedge Live Interpreter")
@@ -390,6 +393,28 @@ class MainWindow(QMainWindow):
         self._set_status("Stopping…")
         self._manager.stop()
 
+    def closeEvent(self, event) -> None:
+        """Never orphan the audio threads: with a session running, ask, then stop it
+        and close once it reports idle. A loop test can't be cancelled, so closing
+        waits for it to finish."""
+        if not (self._manager.running or self._loop_test_running):
+            super().closeEvent(event)
+            return
+        event.ignore()
+        if self.close_pending:
+            return  # already waiting
+        if self._manager.running:
+            answer = QMessageBox.question(
+                self, "Stop live translation?",
+                "Live translation is running. Stop it and close this window?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.close_pending = True
+            self.stop_live_translation()
+        else:
+            self.close_pending = True
+            self._set_status("Closing after the audio test finishes…")
+
     def _run_loop_test(self, start_after: bool) -> None:
         """Run audio.routing_check.run_loop_test on a worker thread (it blocks for
         several seconds) and report back via loop_test_finished."""
@@ -418,6 +443,9 @@ class MainWindow(QMainWindow):
     def _on_loop_test_finished(self, result) -> None:
         fingerprint, start_after, partial, issues = result
         self._loop_test_running = False
+        if self.close_pending:
+            self.close()  # closing was waiting for the test; don't start a session
+            return
         self._set_controls_locked(False)
         if issues:
             self._show_pre_start_issues(issues, "Audio test failed: fix the audio setup below.")
@@ -459,6 +487,8 @@ class MainWindow(QMainWindow):
                 self._set_status(f"Stopped with an error: {self._session_error}"
                                  if self._session_error else "Stopped.")
                 print("Live translation session ended.")
+                if self.close_pending:
+                    self.close()
 
     def _on_direction_state_changed(self, label: str, state: str, message: str) -> None:
         """Slot for direction_state_changed (GUI thread): the direction's status text."""
@@ -584,27 +614,26 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: scrollbar.setValue(scrollbar.maximum()))
 
 
-# You need one (and only one) QApplication instance per application.
-# Pass in sys.argv to allow command line arguments for your app.
-# If you know you won't use command line arguments QApplication([]) works too.
-# Without this, INFO logs from the audio/ modules (e.g. the loop test's NCC
-# readings) are dropped: only warnings reach the console. Same setup as run_cli.py.
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# Standalone run, for testing this window on its own: from the repo root,
+# `python -m ui.live_interpreter` (as a module, so the root-level packages import).
+# main.py runs the full app, which opens this window from ui/main_window.py
+# (importing this module must not launch it).
+if __name__ == "__main__":
+    # You need one (and only one) QApplication instance per application.
+    # Without this, INFO logs from the audio/ modules (e.g. the loop test's NCC
+    # readings) are dropped: only warnings reach the console. Same setup as run_cli.py.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-app = QApplication(sys.argv)
-apply_stylesheet(app, watch=True)  # watch: live-reload ui/style.qss on save
+    app = QApplication(sys.argv)
+    apply_stylesheet(app, watch=True)  # watch: live-reload ui/style.qss on save
 
-# Create a Qt widget, which will be our window.
-window = MainWindow()
-window.show()  # IMPORTANT!!!!! Windows are hidden by default.
-
-# Start the event loop.
-app.exec()
-
-# Your application won't reach here until you exit and the event
-# loop has stopped.
+    window = LiveInterpreterWindow()
+    window.show()  # IMPORTANT!!!!! Windows are hidden by default.
+    app.exec()
 
 #todo:
-# Need to create a manager to concorently run 2 sessions, one for input and one for output, and connect them to the audio pipeline.
-# Figure out bug in audio buffer where when its overloaded, something breaks and gemini keeps sending repeating audio chunks. No distortion just repeating audio and new inputs does not change the output.
 # Figure out why gemini returns a different voice whenever there is a big pause when the user is talking.
+# Figure out how to get program to be signed so that it can be downloaded and run on another computer withouth getting flagged as a virus.
+# Figure out how to turn the program into a .exe file so that it can be run easily on a computer without having to install python and all the dependencies.
+# Come up with a backend server framework that does user authentication and assign users empheral keys that can be used to access the program. This will allow for multiple users to use the program at the same time without having to share a single key.
+# Figure out how to have program download and manage its own 2 virtual cables and rename them to something more user friendly. This will allow the user to not have to worry about setting up the virtual cables and having to rename them manually.

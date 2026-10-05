@@ -2,12 +2,9 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from audio.health import Issue, IssueCode, Severity
+from ui.style import set_style_property
 
-SEVERITY_COLOURS = {
-    Severity.OK: "#2e7d32",
-    Severity.WARNING: "#f9a825",
-    Severity.PROBLEM: "#c62828",
-}
+# Severity colours live in ui/style.qss, keyed on the "severity" property.
 _ICONS = {Severity.WARNING: "⚠", Severity.PROBLEM: "⛔"}
 
 
@@ -16,10 +13,11 @@ class StatusDot(QLabel):
 
     def __init__(self):
         super().__init__("●")
+        self.setObjectName("statusDot")
         self.set_severity(Severity.OK)
 
     def set_severity(self, severity: Severity) -> None:
-        self.setStyleSheet(f"color: {SEVERITY_COLOURS[severity]}; font-size: 18px;")
+        set_style_property(self, "severity", severity.name.lower())
 
 
 class IssuePanel(QWidget):
@@ -77,17 +75,16 @@ class IssuePanel(QWidget):
         self.setVisible(bool(self._rows))
 
     def _build_row(self, issue: Issue) -> QWidget:
-        colour = SEVERITY_COLOURS[issue.level]
         frame = QFrame()
-        frame.setStyleSheet(f"QFrame {{ border-left: 4px solid {colour}; padding-left: 6px; }}"
-                            "QLabel { border: none; }")
+        frame.setObjectName("issueRow")
+        frame.setProperty("severity", issue.level.name.lower())
         layout = QHBoxLayout(frame)
         text = QVBoxLayout()
         direction = self._direction_names.get(issue.label)
         prefix = f"{direction}: " if direction else ""
         message = QLabel(f"{_ICONS.get(issue.level, '')} {prefix}{issue.message}")
         message.setWordWrap(True)
-        message.setStyleSheet("font-weight: bold;")
+        message.setProperty("role", "issueMessage")
         action = QLabel(issue.action)
         action.setWordWrap(True)
         text.addWidget(message)
