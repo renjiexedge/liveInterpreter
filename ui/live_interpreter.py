@@ -14,6 +14,7 @@ from audio.devices import default_device_indices, list_input_devices, list_outpu
 from audio.health import PRE_START_CODES, Issue, IssueCode, Severity
 from audio.routing_check import cable_key, routing_fingerprint, run_loop_test, validate_routing
 from config.audio_config import AudioDeviceConfig
+from config.model_config import DEFAULT_MODEL, LIVE_MODELS
 from config.session_config import (CANDIDATE_TO_STAFF, DIRECTION_NAMES, STAFF_OUTPUT_LANGUAGE,
                                    STAFF_TO_CANDIDATE, DirectionConfig, TwoWayConfig)
 from engines.gemini_live import api_key_present
@@ -85,6 +86,7 @@ MUTE_BUTTON_TEXT = {
 _DIRECTION_STATUS = {
     DirectionState.CONNECTING: "Connecting…",
     DirectionState.CONNECTED: "Connected. Waiting for the other direction…",
+    DirectionState.RECONNECTING: "Reconnecting…",
     DirectionState.STOPPED: "Stopped.",
     DirectionState.FAILED: "Failed. See the message below.",
 }
@@ -195,6 +197,7 @@ class LiveInterpreterWindow(QMainWindow):
         self._session_error = ""  # set by the ERROR state, shown when the session reaches idle
         self._session_translating = False
         self._direction_states: dict[str, DirectionState] = {}
+        self._direction_messages: dict[str, str] = {}  # e.g. "Connection lost. Reconnecting…"
         self._loop_test_running = False
         # Device combinations that passed the loop test; Start requires one.
         self._passed_fingerprints: set[frozenset] = set()
@@ -249,6 +252,7 @@ class LiveInterpreterWindow(QMainWindow):
         self.direction_dots: dict[str, StatusDot] = {}
         self.direction_status: dict[str, QLabel] = {}
         self.mute_buttons: dict[str, QPushButton] = {}
+        self.retry_buttons: dict[str, QPushButton] = {}
         devices_card, devices_body = _card("Audio devices")
         directions_layout = QHBoxLayout()
         directions_layout.setSpacing(24)
@@ -272,9 +276,17 @@ class LiveInterpreterWindow(QMainWindow):
             mute.setCheckable(True)
             mute.toggled.connect(lambda checked, label=label: self._on_mute_toggled(label, checked))
             self.mute_buttons[label] = mute
+            # Shown only while this direction has failed and the other keeps running
+            # (DEGRADED): restarts just this direction.
+            retry = QPushButton("Retry")
+            retry.setToolTip("Restart this direction. The other direction keeps translating.")
+            retry.clicked.connect(lambda _=False, label=label: self._retry_direction(label))
+            retry.setVisible(False)
+            self.retry_buttons[label] = retry
             title_row = QHBoxLayout()
             title_row.addWidget(dot)
             title_row.addWidget(direction_title, stretch=1)
+            title_row.addWidget(retry)
             title_row.addWidget(mute)
             grid.addLayout(title_row, 0, 0, 1, 2)
             grid.addWidget(status, 1, 0, 1, 2)
@@ -304,8 +316,8 @@ class LiveInterpreterWindow(QMainWindow):
             grid.setColumnStretch(1, 1)
             grid.setRowStretch(row, 1)  # keep both columns top-aligned
 
-        # Header: title, plus the audio health indicator (a dot for the worst
-        # active issue and the status line).
+        # Header: title, the model picker, then the audio health indicator (a dot
+        # for the worst active issue and the status line).
         self.status_dot = StatusDot()
         self.status_label = QLabel("Ready. Press Test Audio Devices or Start.")
         self.status_label.setProperty("role", "statusLine")
@@ -315,7 +327,20 @@ class LiveInterpreterWindow(QMainWindow):
         header_layout.setContentsMargins(16, 12, 16, 12)
         title = QLabel("Live Interpreter")
         title.setProperty("role", "windowTitle")
+        # Phase 6b: compare Gemini Live models on quality and cost without code
+        # edits. Item data = model id; both directions use it; fixed while running.
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(False)
+        for model_name, model_id in LIVE_MODELS.items():
+            self.model_combo.addItem(model_name, model_id)
+            self.model_combo.setItemData(self.model_combo.count() - 1, model_id, Qt.ItemDataRole.ToolTipRole)
+        self.model_combo.setCurrentIndex(max(0, self.model_combo.findData(DEFAULT_MODEL)))
+        self.model_combo.setToolTip("Translation model for both directions. "
+                                    "It can't be changed while translating.")
         header_layout.addWidget(title)
+        header_layout.addSpacing(24)
+        header_layout.addWidget(QLabel("Model:"))
+        header_layout.addWidget(self.model_combo)
         header_layout.addStretch()
         header_layout.addWidget(self.status_dot)
         header_layout.addWidget(self.status_label)
@@ -451,6 +476,7 @@ class LiveInterpreterWindow(QMainWindow):
         self._session_error = ""
         self._session_translating = False
         self._direction_states.clear()
+        self._direction_messages.clear()
         self._set_controls_locked(True)
         self.stop_button.setEnabled(True)
         self._manager.start(directions)
@@ -539,10 +565,16 @@ class LiveInterpreterWindow(QMainWindow):
                 self._set_status("Translating.")
                 for label in DIRECTION_TITLES:
                     self._show_direction_status(label)
-            case State.DEGRADED:
+            case State.RECONNECTING | State.DEGRADED:
+                self._session_translating = True
                 self._set_status(message)
+                for label in DIRECTION_TITLES:
+                    self._show_direction_status(label)
             case State.STOPPING:
+                self._session_translating = False
                 self._set_status("Stopping…")
+                for label in DIRECTION_TITLES:
+                    self._show_direction_status(label)  # hides Retry
             case State.ERROR:
                 self._session_error = message
             case State.IDLE:
@@ -562,6 +594,7 @@ class LiveInterpreterWindow(QMainWindow):
     def _on_direction_state_changed(self, label: str, state: str, message: str) -> None:
         """Slot for direction_state_changed (GUI thread): the direction's status text."""
         self._direction_states[label] = DirectionState(state)
+        self._direction_messages[label] = message
         self._show_direction_status(label)
 
     def _show_direction_status(self, label: str) -> None:
@@ -570,9 +603,19 @@ class LiveInterpreterWindow(QMainWindow):
             text = "Idle."
         elif state is DirectionState.CONNECTED and self._session_translating:
             text = "Translating."
+        elif state is DirectionState.RECONNECTING:
+            text = self._direction_messages.get(label) or _DIRECTION_STATUS[state]
         else:
             text = _DIRECTION_STATUS[state]
         self.direction_status[label].setText(text)
+        # Retry only helps while the other direction is still running.
+        self.retry_buttons[label].setVisible(
+            state is DirectionState.FAILED and self._session_translating and self._manager.running)
+
+    def _retry_direction(self, label: str) -> None:
+        """Retry button (GUI thread). SessionManager.retry is thread-safe."""
+        self.retry_buttons[label].setVisible(False)
+        self._manager.retry(label)
 
     def _on_health_changed(self, issue: Issue) -> None:
         """Slot for health_changed (GUI thread): update the issue panel and dots.
@@ -618,8 +661,8 @@ class LiveInterpreterWindow(QMainWindow):
         self.status_label.setText(text)
 
     def _set_controls_locked(self, locked: bool) -> None:
-        """Language and devices are fixed while a session or loop test runs."""
-        for widget in (self.language_combo, *self.device_combos.values(),
+        """Model, language and devices are fixed while a session or loop test runs."""
+        for widget in (self.model_combo, self.language_combo, *self.device_combos.values(),
                        self.audio_test_button, self.start_button):
             widget.setEnabled(not locked)
 
@@ -636,6 +679,7 @@ class LiveInterpreterWindow(QMainWindow):
                 playback=self._device_config(f"{CANDIDATE_TO_STAFF}.playback"),
                 target_language_code=self.staff_language_combo.currentData(),
                 echo_target_language=True,
+                model=self.selected_model(),
             ),
             staff_to_candidate=DirectionConfig(
                 label=STAFF_TO_CANDIDATE,
@@ -643,8 +687,13 @@ class LiveInterpreterWindow(QMainWindow):
                 playback=self._device_config(f"{STAFF_TO_CANDIDATE}.playback"),
                 target_language_code=self.selected_language_code(),
                 echo_target_language=False,
+                model=self.selected_model(),
             ),
         )
+
+    def selected_model(self) -> str:
+        """Model id from the header's model combo (config/model_config.py LIVE_MODELS)."""
+        return self.model_combo.currentData() or DEFAULT_MODEL
 
     def _directions(self) -> list[DirectionConfig]:
         return self._two_way_config().directions()

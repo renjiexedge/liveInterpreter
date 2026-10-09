@@ -8,7 +8,7 @@ import sounddevice as sd
 import soxr
 
 from app_logging.audio_log import RawAudioDumper
-from audio.devices import find_output_device
+from audio.devices import ensure_com_initialized, find_output_device
 from config.audio_config import AudioDeviceConfig
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,10 @@ class AudioPlayer:
 
         self._buffer = bytearray()
         self._buffer_lock = threading.Lock()
+        # start()/reopen()/stop() run on worker threads (asyncio.to_thread); the
+        # health monitor's reopen can race the session's stop.
+        self._lifecycle_lock = threading.Lock()
+        self._closed = False  # set by stop(): reopen() must not bring it back
         self._underrun_count = 0
         self._last_underrun_log = 0.0
         self._muted = False
@@ -107,11 +111,12 @@ class AudioPlayer:
     @property
     def buffered_ms(self) -> float:
         """How far playback is behind: audio queued but not yet played."""
-        if self._stream is None:
+        stream = self._stream
+        if stream is None:
             return 0.0
         with self._buffer_lock:
             remaining = len(self._buffer)
-        return remaining / 2 / self._stream.samplerate * 1000  # mono int16
+        return remaining / 2 / stream.samplerate * 1000  # mono int16
 
     @property
     def muted(self) -> bool:
@@ -151,6 +156,34 @@ class AudioPlayer:
         return frames
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            self._closed = False
+            self._start()
+
+    def reopen(self) -> bool:
+        """Close and re-open the output device, e.g. after the headset was
+        unplugged and plugged back in (audio/health.HealthMonitor calls this
+        while the device is reported disconnected). Audio queued while it was
+        gone is discarded rather than played late. Thread-safe. Returns False
+        once stop() has run; raises if the device still can't be opened."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return False
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except sd.PortAudioError as exc:  # the device may already be gone
+                    logger.info("Closing the output stream failed (%s); discarding it", exc)
+                self._stream = None
+            self._resampler = None  # a fresh one: the native rate may differ now
+            with self._buffer_lock:
+                self._buffer.clear()
+            self._start()
+            return True
+
+    def _start(self) -> None:
+        ensure_com_initialized()  # reopen() runs on a worker thread
         device = find_output_device(self._device_config)
         native_rate = int(device.default_samplerate)
 
@@ -175,7 +208,7 @@ class AudioPlayer:
         self.device_name = device.name
         self.last_callback_at = time.monotonic()  # watchdog grace until the first callback
 
-        if self._debug_dump_path is not None:
+        if self._debug_dump_path is not None and self._dumper is None:
             # Captures exactly what gets handed to the device, post-resample
             # -- lets you compare against the pre-resample dump to see
             # whether corruption is introduced by resample_chunk() or by
@@ -241,9 +274,10 @@ class AudioPlayer:
             return
         samples = np.frombuffer(pcm_bytes, dtype="<i2")
         # Resample before any drop decision, so the resampler's stream state
-        # stays continuous.
-        if self._resampler is not None:
-            samples = self._resampler.resample_chunk(samples)
+        # stays continuous. Local copies: reopen() may swap these meanwhile.
+        resampler, stream = self._resampler, self._stream
+        if resampler is not None:
+            samples = resampler.resample_chunk(samples)
         if not len(samples):
             return
         if (
@@ -256,14 +290,19 @@ class AudioPlayer:
             self._dumper.write(samples.tobytes())
         with self._buffer_lock:
             self._buffer.extend(samples.tobytes())
-            if self._max_buffered_ms is not None and self._stream is not None:
-                max_bytes = int(self._max_buffered_ms / 1000 * self._stream.samplerate) * 2
+            if self._max_buffered_ms is not None and stream is not None:
+                max_bytes = int(self._max_buffered_ms / 1000 * stream.samplerate) * 2
                 excess = len(self._buffer) - max_bytes
                 if excess > 0:
                     del self._buffer[:excess]  # even count: stays sample-aligned
                     self.overflow_dropped_frames += excess // 2
 
     def stop(self) -> None:
+        with self._lifecycle_lock:
+            self._closed = True
+            self._stop()
+
+    def _stop(self) -> None:
         if self._resampler is not None:
             trailing = self._resampler.resample_chunk(np.empty(0, dtype="<i2"), last=True)
             if len(trailing):
@@ -298,8 +337,11 @@ class AudioPlayer:
             else:
                 logger.warning("AudioPlayer stop: buffer didn't fully drain before timeout")
 
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except sd.PortAudioError as exc:  # e.g. the headset was unplugged and never came back
+                logger.info("Closing the output stream failed (%s); discarding it", exc)
             self._stream = None
 
         if self._dumper is not None:

@@ -22,6 +22,12 @@ class HealthConfig:
 
     poll_s: float = 0.25
     disconnect_after_s: float = 1.5     # no device callback for this long -> disconnected
+    # A device with no callback for this long gets re-opened, retried every
+    # reopen_every_s until it's back (headset unplugged and plugged in again).
+    # Longer than disconnect_after_s, so a brief stall isn't treated as an unplug.
+    reopen_devices: bool = True
+    reopen_after_s: float = 3.0
+    reopen_every_s: float = 3.0
     no_signal_after_s: float = 30.0     # pure digital silence for this long -> no signal
     clip_level: float = 0.99
     clip_ratio: float = 0.05            # fraction of blocks clipping within window_s

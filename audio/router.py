@@ -6,7 +6,7 @@ import numpy as np
 import sounddevice as sd
 
 from audio.buffers import JitterBuffer
-from audio.devices import find_input_device
+from audio.devices import ensure_com_initialized, find_input_device
 from audio.resample import Resampler
 from config.audio_config import AudioDeviceConfig, AudioPipelineConfig
 from config.health_config import HealthConfig
@@ -38,6 +38,7 @@ class AudioRouter:
         # shutdown can call stop() while the direction's own cleanup does too, or
         # while start() is still opening the device. The lock serialises them.
         self._lifecycle_lock = threading.Lock()
+        self._stopped = False  # set by stop(): reopen() must not bring it back
 
         # Health stats for audio/health.HealthMonitor. Written by the callback as
         # plain int/float stores (no locking needed), read from the session loop.
@@ -53,9 +54,35 @@ class AudioRouter:
 
     def start(self) -> None:
         with self._lifecycle_lock:
+            self._stopped = False
             self._start()
 
+    def reopen(self) -> bool:
+        """Close and re-open the capture device, e.g. after it was unplugged and
+        plugged back in (audio/health.HealthMonitor calls this while the device
+        is reported disconnected). Thread-safe. Returns False once stop() has
+        run; raises if the device still can't be opened. Doesn't send the
+        end-of-stream sentinel: the session carries on."""
+        with self._lifecycle_lock:
+            if self._stopped:
+                return False
+            self._close_stream()
+            self._resampler = None  # a fresh one: the native rate may differ now
+            self._start()
+            return True
+
+    def _close_stream(self) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except sd.PortAudioError as exc:  # the device may already be gone
+            logger.info("Closing the input stream failed (%s); discarding it", exc)
+        self._stream = None
+
     def _start(self) -> None:
+        ensure_com_initialized()  # start()/reopen() run on worker threads
         device = find_input_device(self._device_config)
         native_rate = int(device.default_samplerate)
         channels = min(device.max_input_channels, 2)
@@ -111,10 +138,8 @@ class AudioRouter:
             self._stop()
 
     def _stop(self) -> None:
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        self._stopped = True
+        self._close_stream()
 
         if self._resampler is not None:
             trailing = self._resampler.flush()

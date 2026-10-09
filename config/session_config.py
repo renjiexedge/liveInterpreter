@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 from config.audio_config import AudioDeviceConfig, AudioPipelineConfig
+from config.model_config import DEFAULT_MODEL
 
 # Direction labels. A = candidate -> staff (target English), B = staff -> candidate.
 # The echo detector uses them to tell local echo (A's output on B's input) from
@@ -29,6 +30,7 @@ class DirectionConfig:
     # False: staff always speak English, and False makes B's own echo die after one pass.
     echo_target_language: bool = True
     pipeline: AudioPipelineConfig = field(default_factory=AudioPipelineConfig)
+    model: str = DEFAULT_MODEL  # Live model id (config/model_config.py LIVE_MODELS)
 
 
 @dataclass

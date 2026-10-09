@@ -6,6 +6,7 @@ Pre-start checks in audio/routing_check.py report through the same Issue type.
 """
 import asyncio
 import enum
+import logging
 import math
 import time
 import unicodedata
@@ -16,6 +17,8 @@ from difflib import SequenceMatcher
 
 from config.health_config import HealthConfig
 from config.session_config import CANDIDATE_TO_STAFF, STAFF_TO_CANDIDATE, DirectionConfig
+
+logger = logging.getLogger(__name__)
 
 
 class Severity(enum.IntEnum):
@@ -50,6 +53,7 @@ class IssueCode(enum.Enum):
     API_KEY_MISSING = "api_key_missing"
     SERVICE_AUTH_FAILED = "service_auth_failed"
     NETWORK_LOST = "network_lost"
+    RECONNECTING = "reconnecting"
     QUOTA_EXCEEDED = "quota_exceeded"
 
 
@@ -107,14 +111,19 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "No {role} device is selected.",
         "Choose one from the list, then press Start again."),
+    # Spec §8.2 "Headset unplugged". The monitor keeps re-opening the device
+    # (HealthConfig.reopen_devices), so plugging it back in resumes the route.
     IssueCode.INPUT_DISCONNECTED: IssueText(
         Severity.PROBLEM,
-        "Warning: input device '{capture}' disconnected or stopped sending audio.",
-        "Reconnect the microphone/cable, then press Stop and Start."),
+        "Input device '{capture}' disconnected or stopped sending audio. This direction's "
+        "translation is paused.",
+        "Reconnect the microphone/cable: translation resumes by itself once it's back. To use "
+        "another device instead, press Stop, choose it, then press Start."),
     IssueCode.OUTPUT_DISCONNECTED: IssueText(
         Severity.PROBLEM,
-        "Warning: output device '{playback}' disconnected. Translated audio can't be played.",
-        "Reconnect the headset/cable, then press Stop and Start."),
+        "Output device '{playback}' disconnected. Translated audio is paused.",
+        "Reconnect the headset/cable: audio resumes by itself once it's back. To use another "
+        "device instead, press Stop, choose it, then press Start."),
     IssueCode.INPUT_NO_SIGNAL: IssueText(
         Severity.WARNING,
         "No sound is coming from '{capture}'.",
@@ -169,12 +178,19 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "Translation service sign-in failed. Contact your administrator and quote diagnostic ID {id}.",
         "Translation can't run until the key is fixed."),
-    # The spec says "Reconnecting; ... until Connected returns", but reconnecting is
-    # Phase 6. Until then a dropped connection ends that direction.
+    # While run_session's reconnect loop is retrying (spec §8.2 wording).
+    IssueCode.RECONNECTING: IssueText(
+        Severity.PROBLEM,
+        "Internet connection lost. Reconnecting; do not continue sensitive questions until "
+        "Connected returns.",
+        "Wait for this direction to show Translating again. If it can't reconnect within about "
+        "a minute, it stops."),
+    # Reconnecting gave up (ResilienceConfig.reconnect_give_up_s).
     IssueCode.NETWORK_LOST: IssueText(
         Severity.PROBLEM,
-        "Internet connection lost. Translation has stopped; do not continue sensitive questions.",
-        "Check the internet connection, then press Start again."),
+        "Internet connection lost and couldn't be restored. Translation has stopped; do not "
+        "continue sensitive questions.",
+        "Check the internet connection, then press Retry (or Stop and Start)."),
     IssueCode.QUOTA_EXCEEDED: IssueText(
         Severity.PROBLEM,
         "Translation service limit reached. Stop the interview and contact the administrator.",
@@ -353,6 +369,9 @@ class _Direction:
     skip_watch: _CounterWatch
     player: object | None = None
     lagging: bool = False
+    # Device re-open (HealthConfig.reopen_devices): "capture"/"playback" -> last try.
+    reopening: set[str] = field(default_factory=set)
+    last_reopen: dict[str, float] = field(default_factory=dict)
 
 
 class HealthMonitor:
@@ -372,6 +391,7 @@ class HealthMonitor:
         self._muted: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping = False
+        self._reopen_tasks: set[asyncio.Task] = set()
 
     # ---- hooks (session loop) ------------------------------------------
     def attach(self, direction: DirectionConfig, router, jitter_buffer) -> None:
@@ -428,6 +448,7 @@ class HealthMonitor:
             capture = router.device_name
             input_down = now - router.last_callback_at > cfg.disconnect_after_s
             self._set(label, IssueCode.INPUT_DISCONNECTED, input_down, capture=capture)
+            self._maybe_reopen(d, "capture", router, now - router.last_callback_at, now)
             self._set(label, IssueCode.INPUT_NO_SIGNAL,
                       not input_down and router.zero_run_s >= cfg.no_signal_after_s, capture=capture)
             self._set(label, IssueCode.INPUT_TOO_LOUD,
@@ -439,6 +460,7 @@ class HealthMonitor:
                 playback = player.device_name
                 self._set(label, IssueCode.OUTPUT_DISCONNECTED,
                           now - player.last_callback_at > cfg.disconnect_after_s, playback=playback)
+                self._maybe_reopen(d, "playback", player, now - player.last_callback_at, now)
                 self._set(label, IssueCode.OUTPUT_STUTTER,
                           d.stutter_watch.update(player.mid_speech_underruns, now))
                 lag_ms = player.buffered_ms
@@ -454,6 +476,30 @@ class HealthMonitor:
             if (label, code) in self._reported and label not in self._muted:
                 if not hits or now - hits[-1] > cfg.echo_strike_window_s:
                     self._set(label, code, False)
+
+    def _maybe_reopen(self, d: _Direction, role: str, device, silent_s: float, now: float) -> None:
+        """Spec §8.2/§13.5 headset unplug: keep re-opening a device that stopped
+        calling back, so plugging it back in resumes the route on its own."""
+        cfg = self._cfg
+        if (not cfg.reopen_devices or silent_s < cfg.reopen_after_s or role in d.reopening
+                or now - d.last_reopen.get(role, 0.0) < cfg.reopen_every_s):
+            return
+        d.reopening.add(role)
+        task = asyncio.get_running_loop().create_task(self._reopen(d, role, device))
+        self._reopen_tasks.add(task)
+        task.add_done_callback(self._reopen_tasks.discard)
+
+    async def _reopen(self, d: _Direction, role: str, device) -> None:
+        label, name = d.config.label, device.device_name
+        try:
+            # Opening a device blocks; keep the loop free for both directions.
+            if await asyncio.to_thread(device.reopen):
+                logger.info("[%s] Re-opened %s device %r", label, role, name)
+        except Exception as exc:  # still unplugged: try again later
+            logger.info("[%s] Couldn't re-open %s device %r yet: %s", label, role, name, exc)
+        finally:
+            d.reopening.discard(role)
+            d.last_reopen[role] = time.monotonic()
 
     def _handle_echo(self, hit: EchoHit) -> None:
         now = time.monotonic()

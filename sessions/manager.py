@@ -5,16 +5,18 @@ Qt-agnostic: it reports through plain callbacks, which ui/live_interpreter.py po
 Signal.emit (safe to call from this thread). Works on a list of DirectionConfig,
 so the one-way app passes one direction and two-way passes two.
 
-State flow (guide/two_way_plan.md §4.4):
-    IDLE -> CONNECTING -> TRANSLATING [-> DEGRADED] -> STOPPING -> IDLE
+State flow (guide/two_way_plan.md §4.4, spec §7):
+    IDLE -> CONNECTING -> TRANSLATING [<-> RECONNECTING] [<-> DEGRADED] -> STOPPING -> IDLE
 Start is atomic: TRANSLATING only once every direction has connected; if any
 direction fails, Stop is pressed, or CONNECT_TIMEOUT_S passes first, all of them
 are torn down. Until then no direction sends audio (see GatedAudio), so a direction
 that connects first can't translate or play anything that a failed start would
-then cut off. Once translating, one direction ending doesn't cancel the others
-(DEGRADED), except a sign-in or quota failure, which stops the whole session
-(spec §8.2/F10: no silent fallback). ERROR is reported just before the final IDLE
-when the session ended because of a failure; its message says why.
+then cut off. Once translating, a dropped connection is re-opened by run_session
+(RECONNECTING until it's back, Phase 6), and a direction that still ends doesn't
+cancel the others (DEGRADED; retry(label) restarts it), except a sign-in or quota
+failure, which stops the whole session (spec §8.2/F10: no silent fallback). ERROR
+is reported just before the final IDLE when the session ended because of a
+failure; its message says why.
 """
 
 import asyncio
@@ -31,7 +33,7 @@ from audio.devices import DeviceNotFoundError
 from audio.health import HealthMonitor, Issue, IssueCode
 from audio.pipeline import build_audio_pipeline
 from config.session_config import DIRECTION_NAMES, DirectionConfig
-from engines.gemini_live import run_session
+from engines.gemini_live import is_connection_drop, run_session
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +45,18 @@ class State(enum.Enum):
     IDLE = "idle"
     CONNECTING = "connecting"
     TRANSLATING = "translating"
+    RECONNECTING = "reconnecting"
     DEGRADED = "degraded"
     STOPPING = "stopping"
     ERROR = "error"
-    # READY / RECONNECTING are Phase 6.
+    # READY (spec §7: audio checked, not yet translating) isn't used: Start goes
+    # straight from the loop test to CONNECTING.
 
 
 class DirectionState(enum.Enum):
     CONNECTING = "connecting"
     CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
     STOPPED = "stopped"
     FAILED = "failed"
 
@@ -85,27 +90,46 @@ class GatedAudio:
 FATAL_CODES = frozenset({IssueCode.SERVICE_AUTH_FAILED, IssueCode.QUOTA_EXCEEDED})
 
 
-def classify_failure(label: str, exc: BaseException) -> Issue:
-    """The spec §8.2 issue for a direction's failure. The Live API reports most
+def failure_code(exc: BaseException) -> IssueCode:
+    """Which spec §8.2 issue a direction's failure is. The Live API reports most
     service errors as google.genai.errors.APIError carrying a WebSocket close code
     and the server's reason text (an invalid key is code 1007, "API key not
     valid..."), so they're told apart by status code and text. A dropped
     connection raises websockets' ConnectionClosed (on send), APIError 1006
-    (abnormal closure, on receive), or an OSError while connecting."""
+    (abnormal closure, on receive), an OSError while connecting, or TimeoutError
+    when a reconnect attempt hangs."""
     if isinstance(exc, (DeviceNotFoundError, sd.PortAudioError)):
-        return Issue(label, IssueCode.SESSION_FAILED, fields={
-            "detail": "an audio device couldn't be opened. It may be unplugged or in use."})
+        return IssueCode.SESSION_FAILED
     code = getattr(exc, "code", None)
     text = str(exc).casefold()
     if code in (401, 403) or any(word in text for word in ("api key", "permission_denied", "unauthenticated")):
+        return IssueCode.SERVICE_AUTH_FAILED
+    if code == 429 or any(word in text for word in ("quota", "resource_exhausted", "rate limit")):
+        return IssueCode.QUOTA_EXCEEDED
+    if isinstance(exc, (OSError, ConnectionClosed, InvalidHandshake, TimeoutError)) or code == 1006:
+        return IssueCode.NETWORK_LOST
+    return IssueCode.SESSION_FAILED
+
+
+def classify_failure(label: str, exc: BaseException) -> Issue:
+    """The spec §8.2 issue for a direction's failure (see failure_code)."""
+    code = failure_code(exc)
+    if isinstance(exc, (DeviceNotFoundError, sd.PortAudioError)):
+        return Issue(label, code, fields={
+            "detail": "an audio device couldn't be opened. It may be unplugged or in use."})
+    if code is IssueCode.SERVICE_AUTH_FAILED:
         diagnostic_id = uuid.uuid4().hex[:8].upper()
         logger.error("[%s] Translation service sign-in failed (diagnostic ID %s): %s", label, diagnostic_id, exc)
-        return Issue(label, IssueCode.SERVICE_AUTH_FAILED, fields={"id": diagnostic_id})
-    if code == 429 or any(word in text for word in ("quota", "resource_exhausted", "rate limit")):
-        return Issue(label, IssueCode.QUOTA_EXCEEDED)
-    if isinstance(exc, (OSError, ConnectionClosed, InvalidHandshake)) or code == 1006:
-        return Issue(label, IssueCode.NETWORK_LOST)
-    return Issue(label, IssueCode.SESSION_FAILED, fields={"detail": str(exc) or type(exc).__name__})
+        return Issue(label, code, fields={"id": diagnostic_id})
+    if code is IssueCode.SESSION_FAILED:
+        return Issue(label, code, fields={"detail": str(exc) or type(exc).__name__})
+    return Issue(label, code)
+
+
+def should_reconnect(exc: BaseException) -> bool:
+    """run_session's reconnect rule: a dropped connection, unless the close
+    reason says sign-in or quota (those stop the session instead)."""
+    return is_connection_drop(exc) and failure_code(exc) not in FATAL_CODES
 
 
 def describe_error(exc: BaseException) -> str:
@@ -136,6 +160,15 @@ class SessionManager:
         self._mute_wanted: dict[str, bool] = {}
         self._players: dict[str, object] = {}
         self._failures: dict[str, Issue] = {}
+        # Session-thread state, kept on self so retry() can restart one direction.
+        self._configs: dict[str, DirectionConfig] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._routers: dict[str, object] = {}
+        self._all_connected: asyncio.Event | None = None
+        self._tasks_changed: asyncio.Event | None = None
+        self._translating = False
+        self._reconnecting: set[str] = set()
+        self._live: set[str] = set()  # directions with an open connection right now
 
     # ---- GUI-thread API -------------------------------------------------
     @property
@@ -181,6 +214,17 @@ class SessionManager:
         if monitor is not None:
             monitor.resume(label)
 
+    def retry(self, label: str) -> None:
+        """Retry button for a direction that failed while the other kept running
+        (spec §7 Degraded: "retry failed direction"). Thread-safe; ignored unless
+        that direction has ended and the session is still translating."""
+        loop = self._loop
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(self._retry, label)
+            except RuntimeError:
+                pass  # the loop closed in the meantime
+
     # ---- session thread ------------------------------------------------
     def _thread_main(self, directions: list[DirectionConfig]) -> None:
         error = ""
@@ -194,6 +238,9 @@ class SessionManager:
             self._stop_event = None
             self._monitor = None
             self._players.clear()
+            self._tasks = {}
+            self._routers = {}
+            self._translating = False
             self._thread = None
             if error:
                 self._on_state(State.ERROR, error)
@@ -210,11 +257,16 @@ class SessionManager:
         monitor_task = asyncio.create_task(monitor.run())
         self._on_state(State.CONNECTING, "")
         self._failures.clear()
+        self._reconnecting.clear()
+        self._live.clear()
+        self._translating = False
 
-        routers: dict[str, object] = {}
+        self._configs = {d.label: d for d in directions}
+        self._routers = routers = {}
         connected = {d.label: asyncio.Event() for d in directions}
-        all_connected = asyncio.Event()  # opens every direction's GatedAudio
-        tasks = {
+        self._all_connected = all_connected = asyncio.Event()  # opens every direction's GatedAudio
+        self._tasks_changed = asyncio.Event()
+        self._tasks = tasks = {
             d.label: asyncio.create_task(
                 self._run_direction(d, monitor, routers, connected[d.label], all_connected))
             for d in directions
@@ -230,8 +282,10 @@ class SessionManager:
                 return self._first_error(tasks) or "Couldn't connect to the translation service in time."
 
             all_connected.set()
-            self._on_state(State.TRANSLATING, "")
+            self._translating = True
+            self._report_running_state()
             await self._run_until_stopped(tasks)
+            self._translating = False
             self._on_state(State.STOPPING, "")
             await self._shutdown(monitor, routers, tasks)
             fatal = any(issue.code in FATAL_CODES for issue in self._failures.values())
@@ -258,22 +312,59 @@ class SessionManager:
                 and not self._stop_event.is_set()
                 and not any(t.done() for t in tasks.values()))
 
-    async def _run_until_stopped(self, tasks) -> None:
+    async def _run_until_stopped(self, tasks: dict) -> None:
         """Wait for Stop or for every direction to end. A direction ending while
-        another is still running puts the session in DEGRADED."""
+        another is still running puts the session in DEGRADED. `tasks` is the
+        live dict: retry() swaps a direction's task in and sets _tasks_changed."""
         stop_wait = asyncio.ensure_future(self._stop_event.wait())
-        pending = set(tasks.values())
         try:
-            while pending:
-                done, pending = await asyncio.wait(pending | {stop_wait}, return_when=asyncio.FIRST_COMPLETED)
+            while running := {t for t in tasks.values() if not t.done()}:
+                self._tasks_changed.clear()
+                changed = asyncio.ensure_future(self._tasks_changed.wait())
+                try:
+                    done, _ = await asyncio.wait(running | {stop_wait, changed},
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    changed.cancel()
                 if stop_wait in done:
                     return
-                pending.discard(stop_wait)
-                if pending:
-                    self._on_state(State.DEGRADED, self._degraded_message(tasks))
+                self._report_running_state()
         finally:
             stop_wait.cancel()
             await asyncio.gather(stop_wait, return_exceptions=True)
+
+    def _report_running_state(self) -> None:
+        """TRANSLATING, RECONNECTING or DEGRADED, from the directions' states.
+        Only once the session is translating (not during the atomic start)."""
+        if not self._translating:
+            return
+        if self._reconnecting:
+            names = " and ".join(DIRECTION_NAMES.get(label, label) for label in sorted(self._reconnecting))
+            self._on_state(State.RECONNECTING, f"Reconnecting {names} translation… "
+                                               "Do not continue sensitive questions until it's back.")
+        elif len(self._live) == len(self._tasks):
+            self._on_state(State.TRANSLATING, "")
+        elif self._live:  # with none live, the session is about to end anyway
+            self._on_state(State.DEGRADED, self._degraded_message())
+
+    def _retry(self, label: str) -> None:
+        """Session loop: restart one ended direction (see retry())."""
+        task, d = self._tasks.get(label), self._configs.get(label)
+        if (task is None or d is None or not task.done() or not self._translating
+                or self._stop_event is None or self._stop_event.is_set()):
+            return
+        issue = self._failures.get(label)
+        if issue is not None and issue.code in FATAL_CODES:
+            return  # the session is stopping anyway
+        if not task.cancelled():
+            task.exception()  # retrieved: no "exception never retrieved" warning
+        if issue is not None:
+            del self._failures[label]
+            self._on_issue(Issue(label, issue.code, active=False))
+        logger.info("[%s] Retrying the direction", label)
+        self._tasks[label] = asyncio.create_task(self._run_direction(
+            d, self._monitor, self._routers, asyncio.Event(), self._all_connected))
+        self._tasks_changed.set()
 
     async def _run_direction(self, d: DirectionConfig, monitor: HealthMonitor,
                              routers: dict, connected: asyncio.Event,
@@ -283,7 +374,22 @@ class SessionManager:
 
         def on_connected() -> None:
             connected.set()
+            self._live.add(label)
             self._on_direction_state(label, DirectionState.CONNECTED, "")
+            if label in self._reconnecting:
+                self._reconnecting.discard(label)
+                self._on_issue(Issue(label, IssueCode.RECONNECTING, active=False))
+            self._report_running_state()
+
+        def on_reconnecting(planned: bool, _reason: str) -> None:  # run_session logs the reason
+            self._reconnecting.add(label)
+            self._live.discard(label)
+            self._on_direction_state(label, DirectionState.RECONNECTING,
+                                     "Renewing the connection…" if planned
+                                     else "Connection lost. Reconnecting…")
+            if not planned:  # a GoAway renewal is a brief planned gap, not a fault
+                self._on_issue(Issue(label, IssueCode.RECONNECTING))
+            self._report_running_state()
 
         def on_player_ready(player) -> None:
             self._players[label] = player
@@ -307,6 +413,9 @@ class SessionManager:
                 on_player_ready=on_player_ready,
                 label=label,
                 on_connected=on_connected,
+                model=d.model,
+                on_reconnecting=on_reconnecting,
+                should_reconnect=should_reconnect,
             )
             self._on_direction_state(label, DirectionState.STOPPED, "")
         except asyncio.CancelledError:
@@ -322,6 +431,10 @@ class SessionManager:
                 self._stop_event.set()  # spec F10: stop translation, no silent fallback
             raise
         finally:
+            self._live.discard(label)
+            if label in self._reconnecting:  # stopped, or reconnecting gave up
+                self._reconnecting.discard(label)
+                self._on_issue(Issue(label, IssueCode.RECONNECTING, active=False))
             # Stops capture and feeds the end-of-stream sentinel (AudioRouter.stop is
             # idempotent, so it doesn't matter if _shutdown already did this).
             await asyncio.to_thread(router.stop)
@@ -349,9 +462,9 @@ class SessionManager:
             return issue.message if issue is not None else describe_error(tasks[label].exception())
         return ""
 
-    @staticmethod
-    def _degraded_message(tasks: dict) -> str:
-        """Spec §8.2: "Candidate-to-staff translation is unavailable. Staff-to-candidate remains active." """
-        down = [DIRECTION_NAMES.get(label, label) for label, t in tasks.items() if t.done()]
-        up = [DIRECTION_NAMES.get(label, label) for label, t in tasks.items() if not t.done()]
+    def _degraded_message(self) -> str:
+        """Spec §8.2: "Candidate-to-staff translation is unavailable. Staff-to-candidate remains active."
+        A direction being retried counts as unavailable until it connects."""
+        down = [DIRECTION_NAMES.get(label, label) for label in self._tasks if label not in self._live]
+        up = [DIRECTION_NAMES.get(label, label) for label in self._tasks if label in self._live]
         return f"{' and '.join(down)} translation is unavailable. {' and '.join(up)} remains active."

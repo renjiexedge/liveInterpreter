@@ -1,12 +1,31 @@
+import ctypes
+import sys
+import threading
 from dataclasses import dataclass
 
 import sounddevice as sd
 
 from config.audio_config import AudioDeviceConfig
 
+_COINIT_MULTITHREADED = 0
+_com_state = threading.local()
+
 
 class DeviceNotFoundError(RuntimeError):
     pass
+
+
+def ensure_com_initialized() -> None:
+    """Call before opening a stream on a thread other than the one that imported
+    sounddevice. PortAudio's WASAPI backend fails to start a stream ("Error
+    starting stream: Unanticipated host error", with a stale WDM-KS message) on a
+    thread where COM isn't initialised, e.g. an asyncio.to_thread worker (seen
+    2026-10-06, PortAudio V19.7.0-devel). Once per thread; a thread that already
+    has COM (Qt's GUI thread) keeps its apartment."""
+    if sys.platform != "win32" or getattr(_com_state, "initialised", False):
+        return
+    ctypes.windll.ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)  # RPC_E_CHANGED_MODE is fine
+    _com_state.initialised = True
 
 
 @dataclass

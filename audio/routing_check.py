@@ -18,7 +18,8 @@ import numpy as np
 import sounddevice as sd
 import soxr
 
-from audio.devices import DeviceInfo, DeviceNotFoundError, find_input_device, find_output_device
+from audio.devices import (DeviceInfo, DeviceNotFoundError, ensure_com_initialized, find_input_device,
+                           find_output_device)
 from audio.health import Issue, IssueCode
 from config.audio_config import AudioDeviceConfig
 from config.health_config import LoopTestConfig
@@ -231,6 +232,7 @@ def _record(captures: dict[str, DeviceInfo], seconds: float,
     """Record every capture device for `seconds`, optionally playing the clip on
     one output. Returns mono float32 at ANALYSIS_RATE per capture label.
     sd.play()/sd.rec() share one global stream, so explicit streams are used."""
+    ensure_com_initialized()  # ui/live_interpreter.py runs the test on a worker thread
     chunks: dict[str, list[np.ndarray]] = {label: [] for label in captures}
     streams = []
     try:

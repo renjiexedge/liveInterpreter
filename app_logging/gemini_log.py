@@ -2,7 +2,8 @@
 
 Provides a preconfigured logger plus small helpers for the events
 gemini_live.py needs visibility into: buffered audio sent to Gemini,
-audio received back from Gemini, and completed transcripts.
+audio received back from Gemini, completed transcripts, and token usage
+(UsageStats, from LiveServerMessage.usage_metadata).
 
 Every helper takes the session's direction label ("A"/"B"), so two
 concurrent directions can be told apart in the console. Per-chunk audio
@@ -114,6 +115,74 @@ class ChunkStats:
     def _maybe_log(self) -> None:
         if time.monotonic() - self._window_start >= self._interval_s:
             self.flush()
+
+
+class _TokenTally:
+    """Summed usage_metadata counts: prompt/response/total plus per-modality."""
+
+    def __init__(self):
+        self.messages = 0
+        self.prompt = self.response = self.total = 0
+        self.prompt_by_modality: dict[str, int] = {}
+        self.response_by_modality: dict[str, int] = {}
+
+    def add(self, usage) -> None:
+        self.messages += 1
+        self.prompt += usage.prompt_token_count or 0
+        self.response += usage.response_token_count or 0
+        self.total += usage.total_token_count or 0
+        for details, tally in ((usage.prompt_tokens_details, self.prompt_by_modality),
+                               (usage.response_tokens_details, self.response_by_modality)):
+            for item in details or []:
+                modality = str(getattr(item.modality, "value", item.modality) or "?")
+                tally[modality] = tally.get(modality, 0) + (item.token_count or 0)
+
+    def __str__(self) -> str:
+        def by_modality(tally: dict[str, int]) -> str:
+            return ", ".join(f"{name} {count}" for name, count in tally.items()) or "-"
+        return (f"{self.messages} message(s): prompt {self.prompt} ({by_modality(self.prompt_by_modality)}), "
+                f"response {self.response} ({by_modality(self.response_by_modality)}), total {self.total}")
+
+
+class UsageStats:
+    """Logs LiveServerMessage.usage_metadata for one direction (Phase 6b: cost per
+    call per model). Each message's counts cover only that message, not the
+    connection so far (checked 2026-10-06 on gemini-3.5-live-translate-preview:
+    the values don't grow), so they're summed. Check this per model: a model
+    whose counts only grow is reporting running totals instead.
+
+    Logs a running total at most once per interval (DEBUG), the total per
+    connection when it ends, and the session total, which is the §7.6 "tokens
+    per call" figure."""
+
+    def __init__(self, label: str = "", model: str = "", interval_s: float = 30.0):
+        self._label = label
+        self._model = model
+        self._interval_s = interval_s
+        self._last_log = time.monotonic()
+        self._connection = 0
+        self._conn = _TokenTally()
+        self._session = _TokenTally()
+
+    def connection_started(self) -> None:
+        self._connection += 1
+        self._conn = _TokenTally()
+
+    def record(self, usage) -> None:
+        self._conn.add(usage)
+        self._session.add(usage)
+        now = time.monotonic()
+        if now - self._last_log >= self._interval_s:
+            logger.debug("%sUsage so far (connection %d): %s", _prefix(self._label), self._connection, self._conn)
+            self._last_log = now
+
+    def connection_ended(self) -> None:
+        logger.info("%sUsage (%s, connection %d ended): %s",
+                    _prefix(self._label), self._model, self._connection, self._conn)
+
+    def session_ended(self, duration_s: float) -> None:
+        logger.info("%sUsage for the session (%s, %.0f s, %d connection(s)): %s",
+                    _prefix(self._label), self._model, duration_s, self._connection, self._session)
 
 
 def log_transcript(transcript: dict[str, str], label: str = "") -> None:
