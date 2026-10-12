@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QGridLayout, Q
                                QVBoxLayout, QWidget)
 
 from config.ui_config import UserProfile
+from storage.user_config import load_user_config
 from ui.bug_report import BugReportDialog
 from ui.style import set_style_property
 
@@ -173,7 +174,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(900, 600))
         self.resize(1200, 800)
 
-        self._profile = profile or UserProfile()
+        self._profile = profile or UserProfile(display_name=load_user_config().display_name)
         self._windows: dict[str, QWidget] = {}  # open feature windows, by Feature.key
         self._feature_buttons: dict[str, FeatureButton] = {}
         # Set when closing this window waits for a feature window that is

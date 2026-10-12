@@ -1,15 +1,12 @@
 import asyncio
 import contextlib
 import functools
-import os
 import re
 import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
 
-from dotenv import load_dotenv
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -19,10 +16,19 @@ from app_logging.audio_log import RawAudioDumper, log_interrupted, log_mime_type
 from app_logging.gemini_log import ChunkStats, UsageStats, log_transcript
 from app_logging.gemini_log import logger as gemini_logger
 from audio.player import AudioPlayer
+from config import credentials
 from config.audio_config import AudioDeviceConfig
 from config.model_config import DEFAULT_MODEL, ResilienceConfig
+from config.paths import debug_dump_dir, resource_path
+from version import RELEASE
 
-load_dotenv()  # reads .env in the project root into the process environment
+if not RELEASE:
+    # Dev only: reads .env in the project root into the process environment.
+    # Imported here so a release build can leave python-dotenv out.
+    # An explicit path: with no __main__ file (python -c, a REPL), find_dotenv
+    # searches from the working directory instead of from this file.
+    from dotenv import load_dotenv
+    load_dotenv(resource_path(".env"))
 
 DEFAULT_TARGET_LANGUAGE_CODE = "en"  # used when the caller doesn't pick a language
 RECEIVE_SAMPLE_RATE = 24000  # PCM16 rate Gemini streams translated audio back at
@@ -31,19 +37,28 @@ SEND_BYTES_PER_MS = 32  # captured audio is 16 kHz mono PCM16
 # normal/going away (server-side rotation), abnormal (network), and the server's
 # transient ones. 1007/1008 (bad key, invalid argument, policy) aren't retried.
 RECONNECT_CLOSE_CODES = frozenset({1000, 1001, 1006, 1011, 1012, 1013, 1014})
+# ChunkStats summary interval: 15 s in release keeps ~9 hours in the 3 x 1 MB log.
+CHUNK_STATS_INTERVAL_S = 15.0 if RELEASE else 5.0
 
 
 def api_key_present() -> bool:
-    """True if GEMINI_API_KEY is set (from .env or the environment). Callers check
-    this before Start, so a missing key gets a friendly message, not a crash."""
-    return bool(os.environ.get("GEMINI_API_KEY"))
+    """True if a key is available (config/credentials.py: the environment, then
+    Windows Credential Manager). Callers check this before Start, so a missing
+    key gets a friendly message, not a crash."""
+    return bool(credentials.get_api_key())
 
 
 @functools.cache
 def get_client() -> genai.Client:
     """The shared client, built on first use rather than at import: genai.Client
-    raises without a key, and importing this module shouldn't."""
-    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    raises without a key, and importing this module shouldn't. Cached, so call
+    reset_client() after the key changes."""
+    return genai.Client(api_key=credentials.get_api_key())
+
+
+def reset_client() -> None:
+    """Drop the cached client, so the next get_client() uses the current key."""
+    get_client.cache_clear()
 
 
 def build_live_config(
@@ -330,7 +345,7 @@ async def run_session(
     audio_queue,
     output_device_config: AudioDeviceConfig | None = None,
     on_transcript: TranscriptCallback | None = None,
-    dump_raw_audio: bool = True,
+    dump_raw_audio: bool = False,
     target_language_code: str = DEFAULT_TARGET_LANGUAGE_CODE,
     echo_target_language: bool = True,
     on_transcript_delta: TranscriptDeltaCallback | None = None,
@@ -372,7 +387,8 @@ async def run_session(
     AudioDeviceConfig's default). Each finished input/output transcript pair
     is reported via on_transcript as it completes.
 
-    When dump_raw_audio is True, every received audio chunk is also written,
+    When dump_raw_audio is True (dev only: ignored in a release build, since it
+    writes speech to disk), every received audio chunk is also written,
     unmodified, to debug_dumps/received_<label>_<timestamp>.wav -- bypassing
     AudioPlayer's resample/device-output step entirely, so the file can be
     checked externally to see whether distortion is already present in the
@@ -390,8 +406,10 @@ async def run_session(
         on_player_ready(audio_player)
 
     raw_dumper: RawAudioDumper | None = None
-    if dump_raw_audio:
-        dump_dir = Path("debug_dumps")
+    if dump_raw_audio and RELEASE:
+        gemini_logger.warning("dump_raw_audio is ignored in a release build.")
+    elif dump_raw_audio:
+        dump_dir = debug_dump_dir()
         dump_dir.mkdir(exist_ok=True)
         # The label keeps two directions started in the same second from
         # opening the same file.
@@ -399,7 +417,7 @@ async def run_session(
         dump_path = dump_dir / f"{dump_name}{datetime.now():%Y%m%d_%H%M%S}.wav"
         raw_dumper = RawAudioDumper(dump_path, sample_rate=RECEIVE_SAMPLE_RATE)
 
-    chunk_stats = ChunkStats(label, player=audio_player)
+    chunk_stats = ChunkStats(label, interval_s=CHUNK_STATS_INTERVAL_S, player=audio_player)
     usage = UsageStats(label, model)
     log_prefix = f"[{label}] " if label else ""
     audio = PrerollBuffer(audio_queue, max_bytes=int(resilience.preroll_ms * SEND_BYTES_PER_MS))
@@ -443,9 +461,10 @@ async def run_session(
                             audio.dropped_bytes / SEND_BYTES_PER_MS)
                         audio.dropped_bytes = 0
                     else:
-                        print(f"{log_prefix}Session started on {model} with translation to "
-                              f"{target_language_code!r} (resumption: {features['session_resumption']}, "
-                              f"compression: {features['context_compression']})")
+                        gemini_logger.info(
+                            "%sSession started on %s with translation to %r (resumption: %s, "
+                            "compression: %s)", log_prefix, model, target_language_code,
+                            features["session_resumption"], features["context_compression"])
                     connected_once = True
                     outage_since = None
                     attempt = 0

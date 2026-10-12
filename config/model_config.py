@@ -1,16 +1,17 @@
 from dataclasses import dataclass
 
 # The Live model every direction uses unless the UI picks another
-# (guide/two_way_plan.md Phase 6b: models are compared without code edits).
-DEFAULT_MODEL = "gemini-3.5-live-translate-preview"
+# (guide/two_way_plan.md Phase 6b: models are compared without code edits;
+# guide/distribution_plan.md decision 8 made 3.8 Live the default).
+DEFAULT_MODEL = "gemini-3.8-live"
 
 # Display name -> model id, for the model combo in ui/live_interpreter.py.
 # Every id here was listed with bidiGenerateContent for the dev key on 2026-10-06
 # and accepted the translation config on connect. Accepting the config doesn't
 # prove a model translates well: run the §7 checks and the §7.6 sheet per model.
 LIVE_MODELS = {
-    "Gemini 3.5 Live Translate (preview)": DEFAULT_MODEL,
-    "Gemini 3.8 Live": "gemini-3.8-live",
+    "Gemini 3.8 Live": DEFAULT_MODEL,
+    "Gemini 3.5 Live Translate (preview)": "gemini-3.5-live-translate-preview",
     "Gemini 3.1 Flash Live (preview)": "gemini-3.1-flash-live-preview",
 }
 

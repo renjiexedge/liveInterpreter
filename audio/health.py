@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
+from audio.virtual_audio import uses_voicemeeter, voicemeeter_running
 from config.health_config import HealthConfig
 from config.session_config import CANDIDATE_TO_STAFF, STAFF_TO_CANDIDATE, DirectionConfig
 
@@ -36,6 +37,7 @@ class IssueCode(enum.Enum):
     LOOP_TEST_PARTIAL = "loop_test_partial"
     DEVICE_OPEN_FAILED = "device_open_failed"
     DEVICE_NOT_SELECTED = "device_not_selected"
+    DRIVER_MISSING = "driver_missing"  # a locked WhatsApp combo found no device
     # During a session (HealthMonitor)
     INPUT_DISCONNECTED = "input_disconnected"
     OUTPUT_DISCONNECTED = "output_disconnected"
@@ -49,6 +51,7 @@ class IssueCode(enum.Enum):
     ECHO_LOCAL = "echo_local"
     ECHO_REMOTE = "echo_remote"
     SESSION_FAILED = "session_failed"
+    VOICEMEETER_NOT_RUNNING = "voicemeeter_not_running"
     # Translation service (spec §8.2), raised by sessions/manager.py / ui/live_interpreter.py
     API_KEY_MISSING = "api_key_missing"
     SERVICE_AUTH_FAILED = "service_auth_failed"
@@ -61,7 +64,7 @@ ECHO_CODES = frozenset({IssueCode.ECHO_SAME_DIRECTION, IssueCode.ECHO_LOCAL, Iss
 PRE_START_CODES = frozenset({
     IssueCode.ROUTING_LOOP, IssueCode.DEVICE_SHARED, IssueCode.DEVICE_LIST_CHANGED,
     IssueCode.AUDIO_TEST_FAILED, IssueCode.DEVICE_OPEN_FAILED, IssueCode.DEVICE_NOT_SELECTED,
-    IssueCode.LOOP_TEST_PARTIAL,
+    IssueCode.LOOP_TEST_PARTIAL, IssueCode.DRIVER_MISSING,
 })
 # Still shown after the session ends, so the user can see why it went wrong.
 STICKY_CODES = ECHO_CODES | {
@@ -111,6 +114,12 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "No {role} device is selected.",
         "Choose one from the list, then press Start again."),
+    # The WhatsApp combos are locked in release, so DEVICE_NOT_SELECTED's "choose
+    # one" can't help: the virtual audio driver isn't installed.
+    IssueCode.DRIVER_MISSING: IssueText(
+        Severity.PROBLEM,
+        "'{device}' wasn't found: {product} isn't installed.",
+        "Install {product} (see the setup guide), restart the computer, then reopen this app."),
     # Spec §8.2 "Headset unplugged". The monitor keeps re-opening the device
     # (HealthConfig.reopen_devices), so plugging it back in resumes the route.
     IssueCode.INPUT_DISCONNECTED: IssueText(
@@ -168,12 +177,16 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "The translation session stopped unexpectedly: {detail}",
         "Press Start to try again. If it keeps happening, check your internet connection."),
+    # A warning, not a blocker: the process name could be wrong on some installs.
+    IssueCode.VOICEMEETER_NOT_RUNNING: IssueText(
+        Severity.WARNING,
+        "Voicemeeter Banana is closed, so the candidate can't hear the translation.",
+        "Open Voicemeeter Banana from the Start menu. Translation resumes by itself."),
     # Spec §8.2 wording, adapted where the app can't do what the spec's text promises yet.
     IssueCode.API_KEY_MISSING: IssueText(
         Severity.PROBLEM,
         "The translation service key is missing, so translation can't start.",
-        "Contact your administrator. (Developers: set GEMINI_API_KEY in the .env file, "
-        "then restart the app.)"),
+        "Open the profile menu → Setup wizard… to enter the key."),
     IssueCode.SERVICE_AUTH_FAILED: IssueText(
         Severity.PROBLEM,
         "Translation service sign-in failed. Contact your administrator and quote diagnostic ID {id}.",
@@ -231,6 +244,16 @@ class Issue:
     @property
     def muted(self) -> bool:
         return bool(self.fields.get("muted"))
+
+
+def log_issue(issue: Issue) -> None:
+    """One log line per issue raised, updated or cleared. Fields are device names
+    and numbers, never transcript text, so the line is safe for bug reports."""
+    if issue.active:
+        logger.info("[%s] Issue %s (%s): %s", issue.label or "-", issue.code.value,
+                    issue.level.name.lower(), issue.fields)
+    else:
+        logger.info("[%s] Issue %s cleared", issue.label or "-", issue.code.value)
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +415,8 @@ class HealthMonitor:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping = False
         self._reopen_tasks: set[asyncio.Task] = set()
+        self._voicemeeter_task: asyncio.Task | None = None
+        self._voicemeeter_checked = -math.inf
 
     # ---- hooks (session loop) ------------------------------------------
     def attach(self, direction: DirectionConfig, router, jitter_buffer) -> None:
@@ -471,6 +496,8 @@ class HealthMonitor:
                           d.skip_watch.update(player.overflow_dropped_frames, now),
                           seconds=f"{cap_ms / 1000:g}" if cap_ms else "?")
 
+        self._maybe_check_voicemeeter(now)
+
         # Echo rows expire on their own unless they muted the player.
         for (label, code), hits in self._echo_hits.items():
             if (label, code) in self._reported and label not in self._muted:
@@ -500,6 +527,30 @@ class HealthMonitor:
         finally:
             d.reopening.discard(role)
             d.last_reopen[role] = time.monotonic()
+
+    def _maybe_check_voicemeeter(self, now: float) -> None:
+        """Every voicemeeter_check_every_s (first time straight away) while a
+        direction uses a Voicemeeter device: with Banana closed, playback into its
+        AUX strip goes nowhere, and nothing else shows it."""
+        if (self._voicemeeter_task is not None
+                or now - self._voicemeeter_checked < self._cfg.voicemeeter_check_every_s):
+            return
+        labels = [label for label, d in self._dirs.items()
+                  if uses_voicemeeter(d.router.device_name)
+                  or (d.player is not None and uses_voicemeeter(d.player.device_name))]
+        if not labels:
+            return
+        self._voicemeeter_checked = now
+        self._voicemeeter_task = asyncio.get_running_loop().create_task(self._check_voicemeeter(labels))
+
+    async def _check_voicemeeter(self, labels: list[str]) -> None:
+        try:
+            running = await asyncio.to_thread(voicemeeter_running)  # tasklist blocks
+            if not self._stopping:
+                for label in labels:
+                    self._set(label, IssueCode.VOICEMEETER_NOT_RUNNING, not running)
+        finally:
+            self._voicemeeter_task = None
 
     def _handle_echo(self, hit: EchoHit) -> None:
         now = time.monotonic()
@@ -539,7 +590,10 @@ class HealthMonitor:
             issue = Issue(label, code, True, severity, fields)
             if previous is None or (previous.level, previous.message) != (issue.level, issue.message):
                 self._reported[key] = issue
+                log_issue(issue)
                 self._on_issue(issue)
         elif previous is not None:
             del self._reported[key]
-            self._on_issue(Issue(label, code, False))
+            issue = Issue(label, code, False)
+            log_issue(issue)
+            self._on_issue(issue)

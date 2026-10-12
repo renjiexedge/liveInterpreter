@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from config.paths import resource_path
 
 
 @dataclass
@@ -8,7 +10,8 @@ class LoopTestConfig:
     starting points: calibrate them against a deliberate loop and deliberate
     speaker-to-mic bleed (guide/two_way_plan.md §6, open question 12)."""
 
-    clip_path: Path = Path("audio_test/loop_test.wav")  # 16-bit PCM WAV; synthetic chirps if missing
+    # 16-bit PCM WAV; synthetic chirps if missing. Bundle-relative, not CWD-relative.
+    clip_path: Path = field(default_factory=lambda: resource_path("audio_test/loop_test.wav"))
     max_lag_s: float = 1.0      # device + driver latency searched by the correlation
     min_ncc: float = 0.25       # peak normalised cross-correlation that counts as "heard"
     min_ratio: float = 4.0      # ...and it must be this many times the silent baseline's peak
@@ -38,6 +41,9 @@ class HealthConfig:
     # off or raised above it. With the cap on, OUTPUT_SKIPPED reports the drops instead.
     lag_warn_ms: float = 3000.0
     lag_clear_ms: float = 1000.0
+    # Voicemeeter Banana process check, while a direction plays into or captures
+    # from a Voicemeeter device (audio/virtual_audio.py).
+    voicemeeter_check_every_s: float = 30.0
 
     # Echo detector (transcript-based).
     echo_window_s: float = 20.0         # how far back output text is kept

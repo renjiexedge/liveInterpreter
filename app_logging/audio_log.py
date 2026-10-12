@@ -14,21 +14,14 @@ triage:
 """
 
 import logging
-import sys
 import threading
 import wave
 from pathlib import Path
 
 logger = logging.getLogger("audio_diag")
+# DEBUG: ChunkStats lines are audio diagnostics the log file keeps. Output goes
+# through the root logger's handlers (app_logging/setup.py configure_logging).
 logger.setLevel(logging.DEBUG)
-logger.propagate = False  # don't double-log through the root logger
-
-if not logger.handlers:
-    _handler = logging.StreamHandler(stream=sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
-    )
-    logger.addHandler(_handler)
 
 
 def _prefix(label: str) -> str:

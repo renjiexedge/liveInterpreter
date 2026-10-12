@@ -1,9 +1,9 @@
-"""Console logging for engines/gemini_live.py.
+"""Logging for engines/gemini_live.py.
 
-Provides a preconfigured logger plus small helpers for the events
-gemini_live.py needs visibility into: buffered audio sent to Gemini,
-audio received back from Gemini, completed transcripts, and token usage
-(UsageStats, from LiveServerMessage.usage_metadata).
+Provides a logger plus small helpers for the events gemini_live.py needs
+visibility into: buffered audio sent to Gemini, audio received back from
+Gemini, completed transcripts (lengths only), and token usage (UsageStats,
+from LiveServerMessage.usage_metadata).
 
 Every helper takes the session's direction label ("A"/"B"), so two
 concurrent directions can be told apart in the console. Per-chunk audio
@@ -13,19 +13,12 @@ prints/s on the event loop once two directions run.
 """
 
 import logging
-import sys
 import time
 
 logger = logging.getLogger("gemini_live")
+# DEBUG: ChunkStats lines are audio diagnostics the log file keeps. Output goes
+# through the root logger's handlers (app_logging/setup.py configure_logging).
 logger.setLevel(logging.DEBUG)
-logger.propagate = False  # don't double-log through the root logger
-
-if not logger.handlers:
-    _handler = logging.StreamHandler(stream=sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
-    )
-    logger.addHandler(_handler)
 
 
 def _prefix(label: str) -> str:
@@ -186,10 +179,11 @@ class UsageStats:
 
 
 def log_transcript(transcript: dict[str, str], label: str = "") -> None:
-    """Log a completed input/output transcript pair."""
+    """Log that an input/output transcript pair completed: character counts only,
+    never the text (logs go into bug reports; guide/distribution_plan.md decision 13)."""
     logger.info(
-        "%sTranscript - input: %r | output: %r",
+        "%sTranscript - input: %d chars | output: %d chars",
         _prefix(label),
-        transcript.get("input", ""),
-        transcript.get("output", ""),
+        len(transcript.get("input", "")),
+        len(transcript.get("output", "")),
     )

@@ -1,4 +1,4 @@
-
+import html
 import logging
 import sys
 import threading
@@ -11,7 +11,8 @@ from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from PySide6.QtGui import QIcon
 
 from audio.devices import default_device_indices, list_input_devices, list_output_devices
-from audio.health import PRE_START_CODES, Issue, IssueCode, Severity
+from app_logging.setup import configure_logging
+from audio.health import PRE_START_CODES, Issue, IssueCode, Severity, log_issue
 from audio.routing_check import cable_key, routing_fingerprint, run_loop_test, validate_routing
 from config.audio_config import AudioDeviceConfig
 from config.model_config import DEFAULT_MODEL, LIVE_MODELS
@@ -21,6 +22,9 @@ from engines.gemini_live import api_key_present
 from sessions.manager import DirectionState, SessionManager, State
 from ui.issue_panel import IssuePanel, StatusDot
 from ui.style import apply_stylesheet
+from version import RELEASE
+
+logger = logging.getLogger(__name__)
 
 WINDOW_ICON_PATH = Path(__file__).with_name("assets") / "logo_square.png"
 
@@ -103,6 +107,14 @@ WHATSAPP_INCOMING_DEFAULT = "CABLE Output"
 WHATSAPP_OUTGOING_DEFAULT = "Voicemeeter AUX Input"
 # Voicemeeter virtual-input strip -> the B bus to route it to (alone) for WhatsApp's mic.
 VOICEMEETER_STRIP_BUS = {"Voicemeeter AUX Input": "B2", "Voicemeeter VAIO3 Input": "B3", "Voicemeeter Input": "B1"}
+# The two WhatsApp combos -> what installs their device. In release they're locked
+# to the defaults above (guide/distribution_plan.md decision 6: testers only pick
+# their headset); in dev they stay editable so other cables can be tried.
+WHATSAPP_PRODUCTS = {
+    f"{CANDIDATE_TO_STAFF}.capture": "VB-Cable",
+    f"{STAFF_TO_CANDIDATE}.playback": "Voicemeeter Banana",
+}
+LOCK_WHATSAPP_DEVICES = RELEASE
 _VIRTUAL_DEVICE_WORDS = ("cable", "voicemeeter", "vb-audio")
 
 
@@ -133,6 +145,29 @@ def _preselect_candidates(inputs, outputs) -> dict[str, list[str | int]]:
     }
 
 
+def _other_cable_end(device_name: str, other_side) -> str | None:
+    """A plain cable's other end: the same name apart from Input/Output."""
+    matches = [d.name for d in other_side if cable_key(d.name) == cable_key(device_name)]
+    # VB-Cable also has a 16-channel "CABLE In 16ch" end; prefer plain "Input".
+    matches.sort(key=lambda name: "input" not in name.casefold())
+    return matches[0] if matches else None
+
+
+def whatsapp_device(key: str, device_name: str, inputs, outputs) -> str | None:
+    """The device to choose in WhatsApp for the one picked in a WhatsApp combo
+    (the other end of the wire), or None if there's no single answer."""
+    if not device_name:
+        return None
+    incoming = key == f"{CANDIDATE_TO_STAFF}.capture"
+    other = _other_cable_end(device_name, outputs if incoming else inputs)
+    if other is None and not incoming:
+        bus = VOICEMEETER_STRIP_BUS.get(device_name.split(" (")[0])
+        if bus is not None:
+            short = f"Voicemeeter Out {bus}"
+            other = next((d.name for d in inputs if d.name.startswith(short)), short)
+    return other
+
+
 def whatsapp_hint(key: str, device_name: str, inputs, outputs) -> str:
     """What to choose in WhatsApp's audio settings for the device picked in one of
     the WhatsApp combos. WhatsApp needs the OTHER end of the wire: its Speaker
@@ -141,13 +176,9 @@ def whatsapp_hint(key: str, device_name: str, inputs, outputs) -> str:
     setting = "Speaker" if incoming else "Microphone"
     if not device_name:
         return f"Choose a device. In WhatsApp, set {setting} to its other end."
-    # A plain cable: the other end has the same name apart from Input/Output.
-    other_side = outputs if incoming else inputs
-    matches = [d.name for d in other_side if cable_key(d.name) == cable_key(device_name)]
-    if matches:
-        # VB-Cable also has a 16-channel "CABLE In 16ch" end; prefer plain "Input".
-        matches.sort(key=lambda name: "input" not in name.casefold())
-        return f"In WhatsApp, set {setting} to: {matches[0]}"
+    other = _other_cable_end(device_name, outputs if incoming else inputs)
+    if other is not None:
+        return f"In WhatsApp, set {setting} to: {other}"
     if "voicemeeter" in device_name.casefold():
         if incoming:
             return ("In WhatsApp, set Speaker to a Voicemeeter virtual input that is routed "
@@ -253,6 +284,11 @@ class LiveInterpreterWindow(QMainWindow):
         self.direction_status: dict[str, QLabel] = {}
         self.mute_buttons: dict[str, QPushButton] = {}
         self.retry_buttons: dict[str, QPushButton] = {}
+        self._locked_device_keys = frozenset(WHATSAPP_PRODUCTS) if LOCK_WHATSAPP_DEVICES else frozenset()
+        # Next to Start: what to set in WhatsApp, which resets its devices every call.
+        self.whatsapp_checklist = QLabel()
+        self.whatsapp_checklist.setWordWrap(True)
+        self.whatsapp_checklist.setProperty("role", "checklist")
         devices_card, devices_body = _card("Audio devices")
         directions_layout = QHBoxLayout()
         directions_layout.setSpacing(24)
@@ -299,6 +335,10 @@ class LiveInterpreterWindow(QMainWindow):
                 for device in inputs if is_input else outputs:
                     combo.addItem(device.name, device.index)
                 self._preselect(combo, preselect[key])
+                if key in self._locked_device_keys:
+                    combo.setEnabled(False)
+                    combo.setToolTip(f"Fixed: the setup guide connects WhatsApp through "
+                                     f"{WHATSAPP_PRODUCTS[key]}.")
                 self.device_combos[key] = combo
                 grid.addWidget(QLabel(role_label), row, 0)
                 grid.addWidget(combo, row, 1)
@@ -315,6 +355,7 @@ class LiveInterpreterWindow(QMainWindow):
                     self._update_whatsapp_hint(key, inputs, outputs)
             grid.setColumnStretch(1, 1)
             grid.setRowStretch(row, 1)  # keep both columns top-aligned
+        self._update_whatsapp_checklist(inputs, outputs)
 
         # Header: title, the model picker, then the audio health indicator (a dot
         # for the worst active issue and the status line).
@@ -359,8 +400,10 @@ class LiveInterpreterWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_live_translation)
         self.stop_button.clicked.connect(self.stop_live_translation)
         actions_layout = QHBoxLayout()
+        actions_layout.setSpacing(12)
         actions_layout.addWidget(self.audio_test_button)
-        actions_layout.addStretch()
+        actions_layout.addSpacing(12)
+        actions_layout.addWidget(self.whatsapp_checklist, stretch=1)
         actions_layout.addWidget(self.start_button)
         actions_layout.addWidget(self.stop_button)
 
@@ -439,6 +482,23 @@ class LiveInterpreterWindow(QMainWindow):
     def _update_whatsapp_hint(self, key: str, inputs, outputs) -> None:
         self.whatsapp_hints[key].setText(
             whatsapp_hint(key, self.device_combos[key].currentText(), inputs, outputs))
+        if self.whatsapp_checklist.text():  # filled once both combos exist
+            self._update_whatsapp_checklist(inputs, outputs)
+
+    def _update_whatsapp_checklist(self, inputs, outputs) -> None:
+        """WhatsApp doesn't remember its audio devices between calls (decision 7),
+        and a Microphone left on its default sends staff's voice untranslated,
+        which the app can't detect. So the settings sit next to Start."""
+        def setting(key: str) -> str:
+            name = whatsapp_device(key, self.device_combos[key].currentText(), inputs, outputs)
+            return html.escape(name) if name else "the other end of the selected cable"
+        # Kept to two lines: a taller actions row squeezes the devices card's hints.
+        self.whatsapp_checklist.setText(
+            f"<b>Every WhatsApp call:</b> Speaker → {setting(f'{CANDIDATE_TO_STAFF}.capture')}, "
+            f"Microphone → {setting(f'{STAFF_TO_CANDIDATE}.playback')}")
+        self.whatsapp_checklist.setToolTip(
+            "WhatsApp resets its audio devices for each call: set both in the call's audio "
+            "settings every time. A Microphone left on its default sends your voice untranslated.")
 
     def test_audio_devices(self):
         """Test Audio Devices button: run the loop test for the selected devices
@@ -459,7 +519,7 @@ class LiveInterpreterWindow(QMainWindow):
             self._set_status("Can't start: the translation service key is missing.")
             return
         directions = self._directions()
-        issues = validate_routing(directions, self._expected_names())
+        issues = self._routing_issues(directions)
         if issues:
             self._show_pre_start_issues(issues, "Can't start: fix the audio setup below.")
             return  # hard gate: never start with a known loop
@@ -516,7 +576,7 @@ class LiveInterpreterWindow(QMainWindow):
         if self._manager.running or self._loop_test_running:
             return
         directions = self._directions()  # read widgets on the GUI thread
-        issues = validate_routing(directions, self._expected_names())
+        issues = self._routing_issues(directions)
         if issues:
             self._show_pre_start_issues(issues, "Fix the audio setup below, then test again.")
             return
@@ -587,7 +647,7 @@ class LiveInterpreterWindow(QMainWindow):
                     self._show_direction_status(label)
                 self._set_status(f"Stopped with an error: {self._session_error}"
                                  if self._session_error else "Stopped.")
-                print("Live translation session ended.")
+                logger.info("Live translation session ended.")
                 if self.close_pending:
                     self.close()
 
@@ -644,9 +704,26 @@ class LiveInterpreterWindow(QMainWindow):
         """Resume audio button on an echo row (only shown when HealthConfig.auto_mute_on_echo is on)."""
         self._manager.resume(label)
 
+    def _routing_issues(self, directions: list[DirectionConfig]) -> list[Issue]:
+        """validate_routing, except that an empty locked WhatsApp combo means the
+        driver isn't installed: there's nothing to choose, so say what to install."""
+        issues = []
+        for issue in validate_routing(directions, self._expected_names()):
+            if issue.code is IssueCode.DEVICE_NOT_SELECTED:
+                role = "capture" if issue.fields.get("role") == "input" else "playback"
+                key = f"{issue.label}.{role}"
+                if key in self._locked_device_keys:
+                    default = (WHATSAPP_INCOMING_DEFAULT if key == f"{CANDIDATE_TO_STAFF}.capture"
+                               else WHATSAPP_OUTGOING_DEFAULT)
+                    issue = Issue(issue.label, IssueCode.DRIVER_MISSING,
+                                  fields={"device": default, "product": WHATSAPP_PRODUCTS[key]})
+            issues.append(issue)
+        return issues
+
     def _show_pre_start_issues(self, issues: list[Issue], status: str) -> None:
         self.issue_panel.clear(PRE_START_CODES)
         for issue in issues:
+            log_issue(issue)
             self.issue_panel.add_issue(issue)
         self._refresh_indicator()
         self._set_status(status)
@@ -661,9 +738,10 @@ class LiveInterpreterWindow(QMainWindow):
         self.status_label.setText(text)
 
     def _set_controls_locked(self, locked: bool) -> None:
-        """Model, language and devices are fixed while a session or loop test runs."""
-        for widget in (self.model_combo, self.language_combo, *self.device_combos.values(),
-                       self.audio_test_button, self.start_button):
+        """Model, language and devices are fixed while a session or loop test runs.
+        Locked WhatsApp combos stay disabled either way."""
+        combos = [combo for key, combo in self.device_combos.items() if key not in self._locked_device_keys]
+        for widget in (self.model_combo, self.language_combo, *combos, self.audio_test_button, self.start_button):
             widget.setEnabled(not locked)
 
     def _two_way_config(self) -> TwoWayConfig:
@@ -738,21 +816,14 @@ class LiveInterpreterWindow(QMainWindow):
 # main.py runs the full app, which opens this window from ui/main_window.py
 # (importing this module must not launch it).
 if __name__ == "__main__":
-    # You need one (and only one) QApplication instance per application.
-    # Without this, INFO logs from the audio/ modules (e.g. the loop test's NCC
-    # readings) are dropped: only warnings reach the console. Same setup as run_cli.py.
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # Log file (and console in dev), plus uncaught exceptions and Qt warnings.
+    # Same setup as main.py.
+    configure_logging(release=RELEASE)
 
+    # You need one (and only one) QApplication instance per application.
     app = QApplication(sys.argv)
-    apply_stylesheet(app, watch=True)  # watch: live-reload ui/style.qss on save
+    apply_stylesheet(app, watch=not RELEASE)  # watch: live-reload ui/style.qss on save (dev only)
 
     window = LiveInterpreterWindow()
     window.show()  # IMPORTANT!!!!! Windows are hidden by default.
     app.exec()
-
-#todo:
-# Figure out why gemini returns a different voice whenever there is a big pause when the user is talking.
-# Figure out how to get program to be signed so that it can be downloaded and run on another computer withouth getting flagged as a virus.
-# Figure out how to turn the program into a .exe file so that it can be run easily on a computer without having to install python and all the dependencies.
-# Come up with a backend server framework that does user authentication and assign users empheral keys that can be used to access the program. This will allow for multiple users to use the program at the same time without having to share a single key.
-# Figure out how to have program download and manage its own 2 virtual cables and rename them to something more user friendly. This will allow the user to not have to worry about setting up the virtual cables and having to rename them manually.
