@@ -47,7 +47,7 @@ Top-up buttons.
 | Element | Position | Behaviour |
 |---|---|---|
 | Logo | Left | Not interactive. The site's wide logo (`ui/assets/logo_wide.png`, which already contains the "Xedge resource" wordmark) at 36 px high. |
-| Report a bug | Right | Secondary pill button with a bug icon. Opens a small dialog: a description box, plus "Include system details" (checked by default). Where reports go is still to be decided (email, form, or issue tracker); until then they're saved to the gitignored `bug_reports/`. "Include recent logs" needs a log file, which the app doesn't write yet. |
+| Report a bug | Right | Secondary pill button with a bug icon. Opens a two-page dialog (`ui/bug_report.py`): a description box and what to include (system details, devices and settings, recent log; all checked by default), then a read-only preview of exactly what will be sent, with **Send** and **Send it myself**. The zip is always saved to `bug_reports\` in the user data folder; Send posts it to the Apps Script relay, and if that fails the folder and an email draft open (guide/distribution_plan.md §4.1). |
 | User profile | Right, after the bug button | Round avatar (32 px; shows initials if there's no picture) and display name. Clicking it opens a menu. There are no user accounts yet, so for v1 this is a placeholder: the name comes from config and the menu only has "About". |
 | Window controls | Far right | See "Title bar" below. |
 

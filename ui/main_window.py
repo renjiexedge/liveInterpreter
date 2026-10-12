@@ -279,7 +279,10 @@ class MainWindow(QMainWindow):
 
     # ---- header actions ----------------------------------------------------
     def _report_bug(self) -> None:
-        BugReportDialog(self).exec()
+        # Settings and issues come from the interpreter window, if it's open.
+        window = self._windows.get("live_interpreter")
+        context = window.report_context() if window is not None else None
+        BugReportDialog(self, reporter=self._profile.name(), context=context).exec()
 
     def _show_about(self) -> None:
         QMessageBox.about(self, "About", "Xedge Resource\nLive Interpreter (preview)")

@@ -67,6 +67,9 @@ class IssuePanel(QWidget):
                     for issue, _ in rows),
                    default=Severity.OK)
 
+    def active_issues(self) -> list[Issue]:
+        return [issue for rows in self._rows.values() for issue, _ in rows]
+
     def _remove(self, key) -> None:
         for _, row in self._rows.pop(key, []):
             row.deleteLater()

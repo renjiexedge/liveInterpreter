@@ -781,6 +781,21 @@ class LiveInterpreterWindow(QMainWindow):
         and the loop-test fingerprint."""
         return {key: combo.currentText() for key, combo in self.device_combos.items()}
 
+    def report_context(self) -> dict[str, str]:
+        """The "Devices and settings" section of a bug report (ui/bug_report.py): device
+        names, languages, model, session state and the active issue codes. Issue
+        codes only, not their fields or text: a report must stay content-free."""
+        context = {DEVICE_ROLES[key][0].rstrip(":"): combo.currentText() or "(none)"
+                   for key, combo in self.device_combos.items()}
+        context["Candidate hears"] = self.selected_language_code()
+        context["Staff hears"] = self.staff_language_combo.currentData()
+        context["Model"] = self.selected_model()
+        context["Session"] = "running" if self._manager.running else "idle"
+        context["Problems shown"] = ", ".join(
+            f"{issue.label or '-'}:{issue.code.name} ({issue.level.name.lower()})"
+            for issue in self.issue_panel.active_issues()) or "none"
+        return context
+
     def selected_language_code(self) -> str:
         """BCP-47 code for the "Candidate hears" combo: direction B's target language."""
         return self.language_combo.currentData()
