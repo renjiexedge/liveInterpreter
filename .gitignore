@@ -8,3 +8,5 @@ audio/plan.md
 debug_dumps
 bug_reports
 tests/sample_audio
+build/
+dist/
