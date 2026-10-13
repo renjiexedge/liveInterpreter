@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import functools
 import re
+import sys
 import time
 from collections import deque
 from collections.abc import Callable
@@ -22,8 +23,9 @@ from config.model_config import DEFAULT_MODEL, ResilienceConfig
 from config.paths import debug_dump_dir, resource_path
 from version import RELEASE
 
-if not RELEASE:
+if not RELEASE and not getattr(sys, "frozen", False):
     # Dev only: reads .env in the project root into the process environment.
+    # Never in a frozen build, even with --dev: it has no .env and no python-dotenv.
     # Imported here so a release build can leave python-dotenv out.
     # An explicit path: with no __main__ file (python -c, a REPL), find_dotenv
     # searches from the working directory instead of from this file.

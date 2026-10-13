@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPixmap
@@ -8,13 +7,14 @@ from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QGridLayout, Q
                                QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
+from config.paths import resource_path
 from config.ui_config import UserProfile
 from storage.user_config import load_user_config
 from ui.bug_report import BugReportDialog
 from ui.style import set_style_property
 from version import __version__, display_version
 
-ASSETS_DIR = Path(__file__).with_name("assets")
+ASSETS_DIR = resource_path("ui/assets")
 ICONS_DIR = ASSETS_DIR / "icons"
 LOGO_PATH = ASSETS_DIR / "logo_wide.png"
 WINDOW_ICON_PATH = ASSETS_DIR / "logo_square.png"

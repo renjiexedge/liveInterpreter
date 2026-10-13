@@ -5,10 +5,11 @@ from PySide6.QtCore import QFileSystemWatcher
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QWidget
 
+from config.paths import resource_path
 from ui.theme import TOKENS
 
-STYLESHEET_PATH = Path(__file__).with_name("style.qss")
-FONTS_DIR = Path(__file__).with_name("fonts")
+STYLESHEET_PATH = resource_path("ui/style.qss")
+FONTS_DIR = resource_path("ui/fonts")
 _TOKEN = re.compile(r"@([a-z][a-z0-9-]*)")
 
 
@@ -21,7 +22,7 @@ def load_fonts() -> None:
 
 # QSS url() paths resolve against the working directory, not the .qss file, so
 # image rules use url(@assets/...) and get an absolute path.
-_PATH_TOKENS = {"assets": Path(__file__).with_name("assets").as_posix()}
+_PATH_TOKENS = {"assets": resource_path("ui/assets").as_posix()}
 
 
 def _render(text: str) -> str:

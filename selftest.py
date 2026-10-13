@@ -74,8 +74,19 @@ def selftest(out: str | None = None) -> int:
         from ui.live_interpreter import LiveInterpreterWindow
         from ui.main_window import MainWindow
         from ui.style import apply_stylesheet
+        from PySide6.QtGui import QFontDatabase, QIcon
+        from config.paths import resource_path
         app = QApplication([])
-        apply_stylesheet(app)
+        apply_stylesheet(app)  # also registers the bundled fonts
+        families = QFontDatabase.families()
+        for family in ("Nunito Sans", "Be Vietnam Pro"):
+            if not any(f.startswith(family) for f in families):
+                raise RuntimeError(f"font {family} not loaded")
+        # A blank pixmap means the SVG plugin (or the PNG one) is missing from the build.
+        for icon in ("ui/assets/icons/bug.svg", "ui/assets/logo_square.png"):
+            if QIcon(str(resource_path(icon))).pixmap(32, 32).isNull():
+                raise RuntimeError(f"{icon} does not render")
+        lines.append("fonts and icons: ok")
         windows = [MainWindow(), LiveInterpreterWindow()]
         app.processEvents()
         for window in windows:

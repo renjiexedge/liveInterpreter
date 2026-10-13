@@ -3,7 +3,6 @@ import logging
 import sys
 import threading
 
-from pathlib import Path
 
 from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QPushButton, QWidget,
                                QMainWindow, QLabel, QVBoxLayout, QComboBox, QScrollArea, QMessageBox)
@@ -16,6 +15,7 @@ from audio.health import PRE_START_CODES, Issue, IssueCode, Severity, log_issue
 from audio.routing_check import cable_key, routing_fingerprint, run_loop_test, validate_routing
 from config.audio_config import AudioDeviceConfig
 from config.model_config import DEFAULT_MODEL, LIVE_MODELS
+from config.paths import resource_path
 from config.session_config import (CANDIDATE_TO_STAFF, DIRECTION_NAMES, STAFF_OUTPUT_LANGUAGE,
                                    STAFF_TO_CANDIDATE, DirectionConfig, TwoWayConfig)
 from engines.gemini_live import api_key_present
@@ -26,7 +26,7 @@ from version import RELEASE, display_version
 
 logger = logging.getLogger(__name__)
 
-WINDOW_ICON_PATH = Path(__file__).with_name("assets") / "logo_square.png"
+WINDOW_ICON_PATH = resource_path("ui/assets/logo_square.png")
 
 
 def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
