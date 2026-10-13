@@ -12,6 +12,7 @@ from config.ui_config import UserProfile
 from storage.user_config import load_user_config
 from ui.bug_report import BugReportDialog
 from ui.style import set_style_property
+from version import __version__, display_version
 
 ASSETS_DIR = Path(__file__).with_name("assets")
 ICONS_DIR = ASSETS_DIR / "icons"
@@ -169,7 +170,7 @@ class MainWindow(QMainWindow):
     def __init__(self, profile: UserProfile | None = None):
         super().__init__()
         self.setObjectName("homeWindow")
-        self.setWindowTitle("Xedge Resource")
+        self.setWindowTitle(f"Xedge Resource - Live Interpreter {display_version()}")
         self.setWindowIcon(QIcon(str(WINDOW_ICON_PATH)))
         self.setMinimumSize(QSize(900, 600))
         self.resize(1200, 800)
@@ -285,4 +286,5 @@ class MainWindow(QMainWindow):
         BugReportDialog(self, reporter=self._profile.name(), context=context).exec()
 
     def _show_about(self) -> None:
-        QMessageBox.about(self, "About", "Xedge Resource\nLive Interpreter (preview)")
+        QMessageBox.about(self, "About", f"Xedge Resource\nLive Interpreter {display_version()}\n"
+                                         f"Version {__version__}")

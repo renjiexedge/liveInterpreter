@@ -9,6 +9,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from version import __version__
+
 from reporting.bug_report import (LOG_FILE, REPORT_FILE, BugReport, RelayError, log_tail,
                                   mailto_url, send_to_relay)
 
@@ -57,7 +59,7 @@ def test_mailto_names_the_attachment(tmp_path):
     query = urllib.parse.parse_qs(url.split("?", 1)[1])
     assert "bug_1.zip" in query["body"][0]
     assert len(query["body"][0]) < 700  # description cut short
-    assert query["subject"] == ["Live Interpreter bug report from Tester"]
+    assert query["subject"] == [f"Live Interpreter {__version__} bug report from Tester"]
 
 
 class _Relay(BaseHTTPRequestHandler):

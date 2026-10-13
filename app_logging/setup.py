@@ -17,6 +17,7 @@ from logging.handlers import RotatingFileHandler
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 
 from config.paths import log_file
+from version import __version__
 
 LOG_MAX_BYTES = 1_000_000
 LOG_BACKUPS = 2
@@ -59,8 +60,8 @@ def configure_logging(release: bool) -> None:
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_thread_uncaught
     qInstallMessageHandler(_log_qt_message)
-    logger.info("Starting (release=%s, Python %s, Windows %s). Log file: %s",
-                release, platform.python_version(), platform.version(), path)
+    logger.info("Starting version %s (release=%s, Python %s, Windows %s). Log file: %s",
+                __version__, release, platform.python_version(), platform.version(), path)
 
 
 def _log_uncaught(exc_type, exc, tb) -> None:

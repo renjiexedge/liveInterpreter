@@ -22,7 +22,7 @@ from engines.gemini_live import api_key_present
 from sessions.manager import DirectionState, SessionManager, State
 from ui.issue_panel import IssuePanel, StatusDot
 from ui.style import apply_stylesheet
-from version import RELEASE
+from version import RELEASE, display_version
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +242,7 @@ class LiveInterpreterWindow(QMainWindow):
 
         # Styled by the #interpreterWindow rules in ui/style.qss (design.md §6).
         self.setObjectName("interpreterWindow")
-        self.setWindowTitle("Xedge Live Interpreter")
+        self.setWindowTitle(f"Xedge Live Interpreter {display_version()}")
         self.setWindowIcon(QIcon(str(WINDOW_ICON_PATH)))
         # Set the window dimensions (16:10) for a good default size
         self.setMinimumSize(QSize(1120, 760))

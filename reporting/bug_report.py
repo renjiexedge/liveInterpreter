@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from version import RELEASE
+from version import __version__, display_version
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,7 @@ RELAY_APP_ID = "xedge-live-interpreter"
 
 
 def app_line() -> str:
-    # Phase 3 replaces this with version.display_version().
-    return f"Live Interpreter ({'release' if RELEASE else 'dev'} build)"
+    return f"Live Interpreter {display_version()}, version {__version__}"
 
 
 def system_details() -> dict[str, str]:
@@ -71,7 +70,7 @@ class BugReport:
 
     @property
     def subject(self) -> str:
-        return f"Live Interpreter bug report from {self.reporter}"
+        return f"Live Interpreter {__version__} bug report from {self.reporter}"
 
     def report_text(self) -> str:
         lines = [f"Reported: {self.created.isoformat(timespec='seconds')}",
