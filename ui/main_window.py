@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPixmap
-from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
                                QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
@@ -111,6 +111,10 @@ class _ElidedLabel(QLabel):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._elide()
 
+    def set_full_text(self, text: str) -> None:
+        self._full_text = text
+        self._elide()
+
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
         if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
@@ -132,13 +136,13 @@ class ProfileButton(QPushButton):
         super().__init__()
         self.setObjectName("profileButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAccessibleName(f"Profile: {profile.name()}")
-        avatar = _transparent_label(profile.initials())
+        self._avatar = avatar = _transparent_label()
         avatar.setObjectName("avatar")
         avatar.setFixedSize(32, 32)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name = _ElidedLabel(profile.name(), PROFILE_NAME_MAX_WIDTH, tooltip_target=self)
+        self._name = name = _ElidedLabel(profile.name(), PROFILE_NAME_MAX_WIDTH, tooltip_target=self)
         name.setProperty("role", "profileName")
+        self.set_profile(profile)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 12, 4)
         layout.setSpacing(8)
@@ -147,6 +151,12 @@ class ProfileButton(QPushButton):
         self.setFixedHeight(40)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setMenu(menu)
+
+    def set_profile(self, profile: UserProfile) -> None:
+        """After the setup wizard changes the name."""
+        self.setAccessibleName(f"Profile: {profile.name()}")
+        self._avatar.setText(profile.initials())
+        self._name.set_full_text(profile.name())
 
     # QPushButton sizes itself from its own text, ignoring child layouts: use the
     # layout's size instead, so the pill follows the name once its font is styled.
@@ -212,7 +222,9 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         menu.setObjectName("profileMenu")
+        menu.addAction("Setup wizard…", self._run_setup_wizard)
         menu.addAction("About", self._show_about)
+        self._profile_button = ProfileButton(self._profile, menu)
 
         row = QHBoxLayout(header)
         row.setContentsMargins(24, 12, 24, 12)
@@ -220,7 +232,7 @@ class MainWindow(QMainWindow):
         row.addWidget(logo)
         row.addStretch()
         row.addWidget(bug_button)
-        row.addWidget(ProfileButton(self._profile, menu))
+        row.addWidget(self._profile_button)
         return header
 
     def _build_content(self) -> QWidget:
@@ -284,6 +296,19 @@ class MainWindow(QMainWindow):
         window = self._windows.get("live_interpreter")
         context = window.report_context() if window is not None else None
         BugReportDialog(self, reporter=self._profile.name(), context=context).exec()
+
+    def _run_setup_wizard(self) -> None:
+        # The wizard re-scans PortAudio and tests the same devices, which would
+        # break a running session: never alongside a feature window.
+        if self._windows:
+            QMessageBox.information(self, "Setup wizard",
+                                    "Close the Live Interpreter window first: the setup wizard tests "
+                                    "the same audio devices.")
+            return
+        from ui.setup_wizard import SetupWizard  # pulls in the audio and Gemini stack
+        if SetupWizard(self).exec() == QDialog.DialogCode.Accepted:
+            self._profile = UserProfile(display_name=load_user_config().display_name)
+            self._profile_button.set_profile(self._profile)
 
     def _show_about(self) -> None:
         QMessageBox.about(self, "About", f"Xedge Resource\nLive Interpreter {display_version()}\n"

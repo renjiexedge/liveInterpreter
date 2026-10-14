@@ -1,0 +1,47 @@
+XEDGE LIVE INTERPRETER - USAGE AGREEMENT (1.0.0 Alpha)
+
+1. What this is
+   You are testing an early (alpha) version of Xedge Live Interpreter for
+   Xedge Resource. It may not work correctly, may stop during a call, and may
+   translate inaccurately. Do not rely on it as the only record of what was said.
+
+2. Who may use it
+   Only you, only on your work computer, only for Xedge Resource interviews.
+   Do not share the installer or copy it to other computers.
+
+3. The service key
+   The app uses a Gemini service key provided by Xedge Resource.
+   Enter it only in the app. Do not share, copy, photograph or post it. Usage is
+   paid for by Xedge Resource, has a spending limit and is shared by all testers;
+   if translation stops with a "service limit" message, tell Johnny.
+
+4. Audio and privacy
+   During translation, speech from you and the candidate is sent to Google's
+   Gemini service to be translated. The app does not save audio or transcripts on
+   your computer. When you tell the candidate the interview is recorded, also tell
+   them a live translation tool is used that sends the audio to Google's
+   translation service.
+   Logs on your computer contain technical information only (device names,
+   connection and audio-quality events), never what was said.
+
+5. Bug reports
+   When you send a bug report you will see exactly what is included before it is
+   sent. Reports go to renjie.xedge@gmail.com and are used only to fix the app.
+
+6. Other software you install
+   The setup guide asks you to install VB-Cable and Voicemeeter Banana from
+   VB-Audio's website. These are separate products under VB-Audio's own terms.
+   Uninstalling Xedge Live Interpreter does not remove them.
+
+7. Feedback
+   Xedge Resource may use your feedback to improve the app, without obligation.
+
+8. No warranty
+   The app is provided "as is". Xedge Resource is not responsible for
+   missed or incorrect translations or interrupted calls during the test.
+
+9. Uninstalling
+   To uninstall the app, go to Settings > Apps and
+   choose to delete your settings and saved key.
+
+Contact: Renjie, renjie.xedge@gmail.com

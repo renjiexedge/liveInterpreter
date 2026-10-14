@@ -63,6 +63,16 @@ def reset_client() -> None:
     get_client.cache_clear()
 
 
+def validate_key(key: str, model: str = DEFAULT_MODEL) -> None:
+    """Raises if `key` can't use `model` (setup wizard, before the key is saved).
+    One small authenticated call: models.get takes ~0.2 s, and an unknown model
+    is a 404 even for a Live-only one, so it also checks the key can see the
+    default model (checked with the dev key, 2026-10-13). A bad key raises
+    genai_errors.ClientError 400 "API key not valid"."""
+    client = genai.Client(api_key=key.strip(), http_options=types.HttpOptions(timeout=15_000))  # ms
+    client.models.get(model=model)
+
+
 def build_live_config(
     target_language_code: str,
     echo_target_language: bool = True,

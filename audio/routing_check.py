@@ -213,6 +213,37 @@ def run_loop_test(directions: list[DirectionConfig], config: LoopTestConfig | No
     return issues
 
 
+class RouteCheckError(RuntimeError):
+    """check_route couldn't open (or got no audio from) a device: `device`."""
+
+    def __init__(self, device: str):
+        super().__init__(device)
+        self.device = device
+
+
+def check_route(play: DeviceInfo, capture: DeviceInfo, config: LoopTestConfig | None = None) -> bool:
+    """Positive check (guide/distribution_plan.md §4.5): is the clip played on
+    `play` heard on `capture`? The setup wizard uses it to prove each WhatsApp
+    wire carries sound (expect True), and that PC sound stays off WhatsApp's mic
+    (expect False). Blocking; never call it on the GUI thread.
+
+    It opens WhatsApp's ends of the wires (CABLE Input, Voicemeeter Out B2), which
+    a session must never do, and plays into the outgoing route: wizard only,
+    before any call."""
+    config = config or LoopTestConfig()
+    clip = load_test_clip(config)
+    seconds = len(clip) / ANALYSIS_RATE + config.max_lag_s + _TAIL_S
+    try:
+        base = _record({"c": capture}, seconds, None, clip)["c"]
+        heard = _record({"c": capture}, seconds, ("p", play), clip)["c"]
+    except _DeviceFailure as failure:
+        raise RouteCheckError(failure.name) from failure
+    peak, floor = peak_ncc(heard, clip, config.min_rms), peak_ncc(base, clip, config.min_rms)
+    logger.info("Route check: %r -> %r: NCC %.3f (baseline %.3f), level %s (baseline %s)",
+                play.name, capture.name, peak, floor, _level(heard), _level(base))
+    return peak >= config.min_ncc and peak >= config.min_ratio * floor
+
+
 def _level(samples: np.ndarray) -> str:
     """RMS level in dBFS, or 'silent' for pure digital silence."""
     rms = float(np.sqrt(np.mean(samples.astype("float64") ** 2))) if len(samples) else 0.0

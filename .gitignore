@@ -3,7 +3,7 @@ pyside6
 *__pycache__/*
 */__pycache__/*
 CLAUDE.md
-guide
+/guide/
 audio/plan.md
 debug_dumps
 bug_reports

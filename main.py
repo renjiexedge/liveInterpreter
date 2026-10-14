@@ -1,5 +1,5 @@
-"""App entry point: the home screen (ui/main_window.py), which opens each feature
-in its own window. `python -m ui.live_interpreter` still runs the Live Interpreter on its own.
+"""App entry point: the setup wizard on first run (ui/setup_wizard.py), then the
+home screen (ui/main_window.py), which opens each feature in its own window. `python -m ui.live_interpreter` still runs the Live Interpreter on its own.
 
 Arguments (guide/distribution_plan.md §4.2):
   --selftest [--out PATH]  check the build and exit (selftest.py); no window opens
@@ -68,6 +68,14 @@ def main() -> int:
                                 "Live Interpreter is already open. Look for it on the taskbar.")
         return 0
     apply_stylesheet(app, watch=not RELEASE)  # watch: live-reload ui/style.qss on save (dev only)
+
+    # First run: the setup wizard comes before the home screen; cancelling it quits.
+    from storage.user_config import load_user_config
+    if not load_user_config().setup_complete:
+        from PySide6.QtWidgets import QDialog
+        from ui.setup_wizard import SetupWizard
+        if SetupWizard().exec() != QDialog.DialogCode.Accepted:
+            return 0
 
     from ui.main_window import MainWindow
     window = MainWindow()

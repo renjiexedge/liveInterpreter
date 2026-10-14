@@ -4,7 +4,8 @@ console, so the result is the exit code, plus a report written to --out.
 
 Checks, in order: the app's modules and key libraries import, the bundled files
 exist, PortAudio lists the WASAPI devices, the keyring backend is Windows
-Credential Manager, and the home and Live Interpreter windows build (offscreen)."""
+Credential Manager, and the home, Live Interpreter and setup wizard windows build
+(offscreen)."""
 import importlib
 import os
 import sys
@@ -13,8 +14,8 @@ from pathlib import Path
 
 EXIT_OK, EXIT_IMPORT, EXIT_ASSETS, EXIT_AUDIO, EXIT_KEYRING, EXIT_UI = 0, 1, 2, 3, 4, 5
 
-# Phase 6 adds ui.setup_wizard here.
-MODULES = ("ui.main_window", "ui.live_interpreter", "ui.bug_report", "sessions.manager",
+MODULES = ("ui.main_window", "ui.live_interpreter", "ui.bug_report", "ui.setup_wizard", "ui.visual_guide",
+           "sessions.manager",
            "engines.gemini_live", "audio.routing_check", "audio.health", "audio.virtual_audio",
            "reporting.bug_report", "storage.user_config", "config.credentials",
            "google.genai", "soxr", "sounddevice", "PySide6.QtSvg", "keyring")
@@ -45,10 +46,12 @@ def selftest(out: str | None = None) -> int:
     lines.append(f"imports: {len(MODULES)} ok")
 
     from config.paths import resource_path
-    missing = [name for name in ASSETS if not resource_path(name).exists()]
+    from ui.visual_guide import GUIDE_IMAGES
+    assets = ASSETS + GUIDE_IMAGES
+    missing = [name for name in assets if not resource_path(name).exists()]
     if missing:
         return _finish(out, lines, EXIT_ASSETS, f"missing {missing}")
-    lines.append(f"assets: {len(ASSETS)} ok")
+    lines.append(f"assets: {len(assets)} ok")
 
     try:
         from audio.devices import list_input_devices, list_output_devices
@@ -87,7 +90,8 @@ def selftest(out: str | None = None) -> int:
             if QIcon(str(resource_path(icon))).pixmap(32, 32).isNull():
                 raise RuntimeError(f"{icon} does not render")
         lines.append("fonts and icons: ok")
-        windows = [MainWindow(), LiveInterpreterWindow()]
+        from ui.setup_wizard import SetupWizard
+        windows = [MainWindow(), LiveInterpreterWindow(), SetupWizard()]
         app.processEvents()
         for window in windows:
             window.close()

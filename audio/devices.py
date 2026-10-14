@@ -60,6 +60,16 @@ def _list_devices(channel_key: str) -> list[DeviceInfo]:
     return devices
 
 
+def rescan_devices() -> None:
+    """Re-initialise PortAudio, whose device list is fixed when sounddevice is
+    imported: a driver installed since then (VB-Cable, Voicemeeter) only shows
+    up after this. Every open stream breaks, so only call it while none is open
+    (the setup wizard, which the home window refuses to open alongside a feature
+    window)."""
+    sd._terminate()
+    sd._initialize()
+
+
 def list_input_devices() -> list[DeviceInfo]:
     return _list_devices("max_input_channels")
 

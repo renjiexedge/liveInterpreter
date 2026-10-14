@@ -1,9 +1,10 @@
 # Builds the one-folder release (guide/distribution_plan.md Phase 4) and checks it.
-#   powershell -ExecutionPolicy Bypass -File build.ps1 [-SkipBuild]
-# Output: dist\LiveInterpreter\ (Phase 5 packs it into the installer).
+#   powershell -ExecutionPolicy Bypass -File build.ps1 [-SkipBuild] [-Installer]
+# Output: dist\LiveInterpreter\; with -Installer, also the Phase 5 Inno Setup installer
+# dist\XedgeLiveInterpreter-<version>-setup.exe (needs Inno Setup 6), only if the checks pass.
 # Checks: the self-test passes (it also asserts the WinVaultKeyring backend and the
 # bundled files), the real loop-test clip is bundled, and no .env or API key is in dist\.
-param([switch]$SkipBuild)
+param([switch]$SkipBuild, [switch]$Installer)
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -51,3 +52,20 @@ if ($failed) {
     exit 1
 }
 Write-Host "Build OK: $exe" -ForegroundColor Green
+if (-not $Installer) { exit 0 }
+
+# 4. Installer (installer\LiveInterpreter.iss). Version defines come from version.py.
+$iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+if (-not $iscc) {
+    $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $iscc) { throw "Inno Setup 6 not found (ISCC.exe). Install it from https://jrsoftware.org/isdl.php" }
+$v = & $python -c "import version as v; print(v.__version__); print(f'{v.DISPLAY_VERSION} (build {v.BUILD})'); print('.'.join(map(str, v.FILE_VERSION)))"
+if ($LASTEXITCODE -ne 0 -or $v.Count -ne 3) { throw "Couldn't read version.py" }
+$agreement = Join-Path $PSScriptRoot "installer\tester_agreement.txt"
+$blanks = Select-String -Path $agreement -Pattern "\[[^\]]+\]" -AllMatches | ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
+if ($blanks) { Write-Host "WARNING: tester_agreement.txt still has blanks: $($blanks -join ', ')" -ForegroundColor Yellow }
+& $iscc /Q "/DAppVersion=$($v[0])" "/DAppVerName=$($v[1])" "/DFileVersion=$($v[2])" (Join-Path $PSScriptRoot "installer\LiveInterpreter.iss")
+if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
+Write-Host "Installer OK: $(Join-Path $PSScriptRoot "dist\XedgeLiveInterpreter-$($v[0])-setup.exe")" -ForegroundColor Green

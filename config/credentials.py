@@ -2,7 +2,7 @@
 (guide/distribution_plan.md decision 2): never in a file the app ships or writes.
 
 GEMINI_API_KEY in the environment (the dev .env) wins over the stored key.
-Until the setup wizard exists, store a key with:
+The setup wizard (ui/setup_wizard.py) stores it; from a shell:
     env/Scripts/python.exe -m config.credentials set     (or: delete, status)
 After changing the key, call engines.gemini_live.reset_client()."""
 import logging
