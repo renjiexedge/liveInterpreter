@@ -10,3 +10,4 @@ bug_reports
 tests/sample_audio
 build/
 dist/
+bug_reports/

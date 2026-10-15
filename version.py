@@ -11,10 +11,10 @@ Release turns off: raw audio dumps, .env loading, QSS live-reload and console
 logging, and locks the WhatsApp device combos."""
 import sys
 
-__version__ = "1.0.0-alpha.3"
-DISPLAY_VERSION = "1.0.3 Alpha"
+__version__ = "1.0.0-alpha.5"
+DISPLAY_VERSION = "1.0.5 Alpha"
 BUILD = int(__version__.rsplit(".", 1)[1])
-FILE_VERSION = (1, 0, 0, BUILD)  # numeric only
+FILE_VERSION = (1, 0, 5, BUILD)  # numeric only
 
 RELEASE = (getattr(sys, "frozen", False) or "--release" in sys.argv) and "--dev" not in sys.argv
 

@@ -16,7 +16,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from app_logging.audio_log import RawAudioDumper, log_interrupted, log_mime_type
 from app_logging.gemini_log import ChunkStats, UsageStats, log_transcript
 from app_logging.gemini_log import logger as gemini_logger
-from audio.player import AudioPlayer
+from audio.player import AudioPlayer, is_silent
 from config import credentials
 from config.audio_config import AudioDeviceConfig
 from config.model_config import DEFAULT_MODEL, ResilienceConfig
@@ -195,7 +195,8 @@ class PrerollBuffer:
 
 class _Link:
     """Connection bookkeeping that outlives a single connection: the latest
-    resumption handle, and the GoAway renewal request."""
+    resumption handle, the GoAway renewal request, and the stall watch's view of
+    speech heard but not yet answered."""
 
     def __init__(self, label: str, margin_s: float):
         self._prefix = f"[{label}] " if label else ""
@@ -204,6 +205,8 @@ class _Link:
         self.renew = asyncio.Event()  # set when this connection should be replaced now
         self._renew_pending = False
         self._timer: asyncio.TimerHandle | None = None
+        self._unanswered_since: float | None = None
+        self._unanswered_chars = 0
 
     def new_connection(self) -> None:
         self.renew.clear()
@@ -211,6 +214,24 @@ class _Link:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
+        self.answered()
+
+    def heard(self, text: str) -> None:
+        """An input transcription delta: speech now waiting for a translation."""
+        chars = len(text.strip())
+        if chars:
+            if self._unanswered_since is None:
+                self._unanswered_since = time.monotonic()
+            self._unanswered_chars += chars
+
+    def answered(self) -> None:
+        """Translation came back (audible audio or output text), or the turn ended."""
+        self._unanswered_since = None
+        self._unanswered_chars = 0
+
+    def stalled(self, after_s: float, min_chars: int) -> bool:
+        return (self._unanswered_since is not None and self._unanswered_chars >= min_chars
+                and time.monotonic() - self._unanswered_since >= after_s)
 
     def session_resumption_update(self, update: types.LiveServerSessionResumptionUpdate) -> None:
         if update.resumable and update.new_handle:
@@ -228,8 +249,15 @@ class _Link:
             self._timer = asyncio.get_running_loop().call_later(delay, self.renew.set)
 
     def turn_ended(self) -> None:
+        self.answered()
         if self._renew_pending:
             self.renew.set()
+
+
+async def _watch_stall(link: _Link, after_s: float, min_chars: int) -> None:
+    """Returns once the connection has stalled (see _Link.stalled)."""
+    while not link.stalled(after_s, min_chars):
+        await asyncio.sleep(1.0)
 
 
 async def send_audio(session, audio_queue, chunk_stats: ChunkStats | None = None):
@@ -291,11 +319,15 @@ async def receive_responses(
                     # .text can be None on some deltas (e.g. an interim/empty update).
                     delta = server_content.input_transcription.text or ""
                     input_text += delta
+                    if link is not None:
+                        link.heard(delta)
                     if delta and on_transcript_delta is not None:
                         on_transcript_delta("input", delta)
                 if server_content.output_transcription:
                     delta = server_content.output_transcription.text or ""
                     output_text += delta
+                    if delta and link is not None:
+                        link.answered()
                     if delta and on_transcript_delta is not None:
                         on_transcript_delta("output", delta)
                 if server_content.model_turn:
@@ -304,6 +336,10 @@ async def receive_responses(
                             if part.inline_data.mime_type != last_mime_type:
                                 last_mime_type = part.inline_data.mime_type
                                 log_mime_type(last_mime_type, label)
+                            # Gemini streams real-time silence even while stuck,
+                            # so only audible audio counts as an answer.
+                            if link is not None and not is_silent(part.inline_data.data):
+                                link.answered()
                             if chunk_stats is not None:
                                 chunk_stats.received(part.inline_data.data)
                             if raw_dumper is not None:
@@ -329,14 +365,19 @@ async def receive_responses(
 
 
 async def _run_connection(session, audio: PrerollBuffer, link: _Link, receive_kwargs: dict,
-                          chunk_stats: ChunkStats) -> str:
+                          chunk_stats: ChunkStats, resilience: ResilienceConfig) -> str:
     """Send and receive on one open connection. Returns "ended" when the caller's
-    audio stream ended, "renew" when a GoAway renewal is due; raises whatever
-    ended the connection otherwise."""
+    audio stream ended, "renew" when a GoAway renewal is due, "stalled" when the
+    stall watch fired; raises whatever ended the connection otherwise."""
     send_task = asyncio.create_task(send_audio(session, audio, chunk_stats))
     receive_task = asyncio.create_task(receive_responses(session, link=link, **receive_kwargs))
     renew_task = asyncio.create_task(link.renew.wait())
     tasks = (send_task, receive_task, renew_task)
+    stall_task = None
+    if resilience.stall_after_s > 0:
+        stall_task = asyncio.create_task(
+            _watch_stall(link, resilience.stall_after_s, resilience.stall_min_input_chars))
+        tasks += (stall_task,)
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
@@ -350,6 +391,8 @@ async def _run_connection(session, audio: PrerollBuffer, link: _Link, receive_kw
         return "ended"
     if renew_task in done:
         return "renew"
+    if stall_task in done:
+        return "stalled"
     raise ConnectionError("the server ended the stream")
 
 
@@ -368,6 +411,7 @@ async def run_session(
     resilience: ResilienceConfig | None = None,
     on_reconnecting: ReconnectingCallback | None = None,
     should_reconnect: Callable[[BaseException], bool] = is_connection_drop,
+    on_stalled: Callable[[float], None] | None = None,
 ) -> None:
     """Open a Live translation session on `model` and run sending/receiving
     concurrently, reconnecting as needed (spec §10.2, tuned by resilience).
@@ -393,6 +437,9 @@ async def run_session(
     resilience.preroll_ms) and sent first. An unplanned outage longer than
     resilience.reconnect_give_up_s raises its last error. A failure before the
     first connection opens is raised straight away (the caller's atomic start).
+    A connection that transcribes speech but returns no translation for
+    resilience.stall_after_s is replaced by a fresh (not resumed) session, and
+    on_stalled(stall_after_s) is called first.
 
     Translated audio is played out through the audio/ package's AudioPlayer,
     targeting output_device_config (defaults to the virtual cable, matching
@@ -483,13 +530,21 @@ async def run_session(
                     if on_connected is not None:
                         on_connected()
                     try:
-                        outcome = await _run_connection(session, audio, link, receive_kwargs, chunk_stats)
+                        outcome = await _run_connection(session, audio, link, receive_kwargs, chunk_stats,
+                                                        resilience)
                     finally:
                         usage.connection_ended()
                 if outcome == "ended":
                     return
                 planned = True
-                reason = "the server asked for a new connection (GoAway)"
+                if outcome == "stalled":
+                    reason = (f"speech was transcribed but no translation came back for "
+                              f"{resilience.stall_after_s:g} s")
+                    link.handle = None  # resuming could bring the stuck state back
+                    if on_stalled is not None:
+                        on_stalled(resilience.stall_after_s)
+                else:
+                    reason = "the server asked for a new connection (GoAway)"
             except Exception as exc:
                 text = str(exc).casefold()
                 rejected_argument = (isinstance(exc, genai_errors.APIError) and exc.code == 1007

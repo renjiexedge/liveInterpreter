@@ -22,10 +22,27 @@ _STUTTER_GAP_S = 0.5  # audio resuming within this long of running dry counts as
 # is this far behind, so lag heals during pauses without touching speech.
 _SILENCE_DROP_MIN_BUFFERED_MS = 100.0
 _SILENCE_PEAK = 64  # int16 peak at or below this (about -54 dBFS) counts as silence
-# Spec §11 max_output_queue_ms: past this, write() drops the OLDEST queued audio,
-# so playback never runs more than this far behind (latency over completeness).
-# The backstop for lag built up during speech; silence dropping handles pauses.
-MAX_OUTPUT_QUEUE_MS = 1200.0
+
+
+def is_silent(samples) -> bool:
+    """True if int16 PCM (bytes or a numpy array) peaks at or below _SILENCE_PEAK.
+    Also used by the stall watch: Gemini's real-time silence isn't a translation."""
+    if isinstance(samples, (bytes, bytearray, memoryview)):
+        samples = np.frombuffer(samples, dtype="<i2", count=len(samples) // 2)
+    return not len(samples) or int(np.abs(samples.astype(np.int32)).max()) <= _SILENCE_PEAK
+
+# Spec §11 max_output_queue_ms, applied to lag: how far playback has fallen
+# behind real time since the current stretch of audio began (callbacks lost or
+# late). Past it, write() drops the OLDEST queued audio to catch up (latency over
+# completeness). It isn't a cap on the queue: gemini-3.8-live sends each reply
+# faster than real time, so a burst queues several seconds that still play on
+# time. Capping the queue at this discarded ~70% of every reply (bug report
+# 2026-10-15). The backstop for lag built up during speech; silence dropping
+# handles pauses.
+MAX_OUTPUT_LAG_MS = 1200.0
+# Backstop on the queue itself (memory, a runaway reply). Interrupted turns are
+# flushed anyway, so normal speech never gets near it.
+MAX_OUTPUT_QUEUE_MS = 30_000.0
 
 
 class AudioPlayer:
@@ -52,9 +69,11 @@ class AudioPlayer:
         resample_quality: str = "HQ",
         debug_dump_path: str | Path | None = None,
         max_buffered_ms: float | None = MAX_OUTPUT_QUEUE_MS,
+        max_lag_ms: float | None = MAX_OUTPUT_LAG_MS,
     ):
         self._device_config = device_config
         self._max_buffered_ms = max_buffered_ms
+        self._max_lag_ms = max_lag_ms
         self._source_rate = source_rate
         self._resample_quality = resample_quality
         self._resampler: soxr.ResampleStream | None = None
@@ -64,6 +83,11 @@ class AudioPlayer:
 
         self._buffer = bytearray()
         self._buffer_lock = threading.Lock()
+        # The current run: audio playing back to back since the buffer was last
+        # empty. Its frames are due at real-time pace from when it started, so
+        # lag = frames due by now - frames played (or skipped). Under _buffer_lock.
+        self._run_started_at: float | None = None
+        self._run_frames = 0
         # start()/reopen()/stop() run on worker threads (asyncio.to_thread); the
         # health monitor's reopen can race the session's stop.
         self._lifecycle_lock = threading.Lock()
@@ -79,7 +103,7 @@ class AudioPlayer:
         self.portaudio_underflows = 0  # callback ran late; the device played silence
         self.empty_buffer_underruns = 0  # callback ran on time but our buffer was short
         self.silence_dropped_frames = 0  # silent audio write() discarded while behind
-        self.overflow_dropped_frames = 0  # oldest audio discarded past max_buffered_ms
+        self.overflow_dropped_frames = 0  # oldest audio discarded past max_lag_ms / max_buffered_ms
         self.flushed_frames = 0  # queued audio discarded by flush() (interrupted turns)
 
         # Health stats for audio/health.HealthMonitor, written by the callback.
@@ -105,18 +129,42 @@ class AudioPlayer:
 
     @property
     def max_buffered_ms(self) -> float | None:
-        """The queue cap; None means unbounded."""
+        """The queue backstop; None means unbounded."""
         return self._max_buffered_ms
 
     @property
+    def max_lag_ms(self) -> float | None:
+        """The lag cap (see MAX_OUTPUT_LAG_MS); None means unbounded."""
+        return self._max_lag_ms
+
+    @property
     def buffered_ms(self) -> float:
-        """How far playback is behind: audio queued but not yet played."""
+        """Audio queued but not yet played. Not lag: a reply that arrived faster
+        than real time queues audio that still plays on time (see lag_ms)."""
         stream = self._stream
         if stream is None:
             return 0.0
         with self._buffer_lock:
             remaining = len(self._buffer)
         return remaining / 2 / stream.samplerate * 1000  # mono int16
+
+    @property
+    def lag_ms(self) -> float:
+        """How far playback is behind real time: queued audio that should
+        already have played since the current run of audio started."""
+        stream = self._stream
+        if stream is None:
+            return 0.0
+        rate = stream.samplerate
+        with self._buffer_lock:
+            frames = self._lag_frames(time.monotonic(), rate)
+        return frames / rate * 1000
+
+    def _lag_frames(self, now: float, rate: float) -> int:
+        """Call with _buffer_lock held."""
+        if self._run_started_at is None or not self._buffer:
+            return 0
+        return max(0, int((now - self._run_started_at) * rate) - self._run_frames)
 
     @property
     def muted(self) -> bool:
@@ -238,6 +286,9 @@ class AudioPlayer:
             take = min(available, needed_bytes)
             chunk = bytes(self._buffer[:take])
             del self._buffer[:take]
+            self._run_frames += take // 2
+            if take < needed_bytes:
+                self._run_started_at = None  # ran dry: the next write starts a new run
 
         samples = np.frombuffer(chunk, dtype="<i2")
         outdata[: len(samples), 0] = samples
@@ -268,8 +319,9 @@ class AudioPlayer:
         """Resample and append to the internal buffer; the real-time
         callback drains it at its own pace. Non-blocking (aside from a
         brief lock), safe to call from any thread. Dropped while muted, and
-        dropped if it's silent while playback is already behind. If the queue
-        then holds more than max_buffered_ms, the oldest audio is dropped."""
+        dropped if it's silent while audio is already queued. If playback then
+        lags real time by more than max_lag_ms, or the queue holds more than
+        max_buffered_ms, the oldest audio is dropped."""
         if self._muted or self._user_muted:
             return
         samples = np.frombuffer(pcm_bytes, dtype="<i2")
@@ -280,22 +332,29 @@ class AudioPlayer:
             samples = resampler.resample_chunk(samples)
         if not len(samples):
             return
-        if (
-            self.buffered_ms > _SILENCE_DROP_MIN_BUFFERED_MS
-            and int(np.abs(samples.astype(np.int32)).max()) <= _SILENCE_PEAK
-        ):
+        if self.buffered_ms > _SILENCE_DROP_MIN_BUFFERED_MS and is_silent(samples):
             self.silence_dropped_frames += len(samples)
             return
         if self._dumper is not None:
             self._dumper.write(samples.tobytes())
         with self._buffer_lock:
+            now = time.monotonic()
+            if not self._buffer:
+                self._run_started_at, self._run_frames = now, 0
             self._buffer.extend(samples.tobytes())
-            if self._max_buffered_ms is not None and stream is not None:
-                max_bytes = int(self._max_buffered_ms / 1000 * stream.samplerate) * 2
-                excess = len(self._buffer) - max_bytes
-                if excess > 0:
-                    del self._buffer[:excess]  # even count: stays sample-aligned
-                    self.overflow_dropped_frames += excess // 2
+            if stream is None:
+                return
+            rate = stream.samplerate
+            excess = 0  # frames
+            if self._max_lag_ms is not None:
+                excess = self._lag_frames(now, rate) - int(self._max_lag_ms / 1000 * rate)
+            if self._max_buffered_ms is not None:
+                excess = max(excess, len(self._buffer) // 2 - int(self._max_buffered_ms / 1000 * rate))
+            excess = min(excess, len(self._buffer) // 2)
+            if excess > 0:
+                del self._buffer[:excess * 2]
+                self._run_frames += excess  # skipped counts as played: lag drops by as much
+                self.overflow_dropped_frames += excess
 
     def stop(self) -> None:
         with self._lifecycle_lock:

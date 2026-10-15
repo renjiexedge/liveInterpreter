@@ -25,9 +25,10 @@ class DirectionConfig:
     capture: AudioDeviceConfig
     playback: AudioDeviceConfig
     target_language_code: str
-    # Voice audio that's already in the target language too ("parrot")? A must be
-    # True: the candidate may mix English in and staff must hear all of it. B can be
-    # False: staff always speak English, and False makes B's own echo die after one pass.
+    # Voice audio that's already in the target language too ("parrot")? True for
+    # both directions: the candidate may mix English in, and staff may speak the
+    # candidate's language, and with False either goes silent. (False would make
+    # a direction's own echo die after one pass, but echo is detected instead.)
     echo_target_language: bool = True
     pipeline: AudioPipelineConfig = field(default_factory=AudioPipelineConfig)
     model: str = DEFAULT_MODEL  # Live model id (config/model_config.py LIVE_MODELS)

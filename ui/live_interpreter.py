@@ -2,6 +2,7 @@ import html
 import logging
 import sys
 import threading
+from datetime import datetime
 
 
 from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QPushButton, QWidget,
@@ -14,14 +15,15 @@ from app_logging.setup import configure_logging
 from audio.health import PRE_START_CODES, Issue, IssueCode, Severity, log_issue
 from audio.routing_check import cable_key, routing_fingerprint, run_loop_test, validate_routing
 from audio.virtual_audio import (VB_CABLE, VOICEMEETER_BANANA, WHATSAPP_INCOMING_DEFAULT,
-                                 WHATSAPP_OUTGOING_DEFAULT)
+                                 WHATSAPP_OUTGOING_DEFAULT, uses_voicemeeter, voicemeeter_running)
 from config.audio_config import AudioDeviceConfig
-from config.model_config import DEFAULT_MODEL, LIVE_MODELS
+from config.model_config import DEFAULT_MODEL, offered_models
 from config.paths import resource_path
 from config.session_config import (CANDIDATE_TO_STAFF, DIRECTION_NAMES, STAFF_OUTPUT_LANGUAGE,
                                    STAFF_TO_CANDIDATE, DirectionConfig, TwoWayConfig)
 from engines.gemini_live import api_key_present
 from sessions.manager import DirectionState, SessionManager, State
+from storage.last_session import load_last_session, save_last_session
 from storage.user_config import load_user_config, save_user_config
 from ui.issue_panel import IssuePanel, StatusDot
 from ui.style import apply_stylesheet
@@ -31,6 +33,9 @@ from version import RELEASE, display_version
 logger = logging.getLogger(__name__)
 
 WINDOW_ICON_PATH = resource_path("ui/assets/logo_square.png")
+# report_context keys for the last session (also kept across windows in last_session.json).
+LAST_SESSION_KEY = "Last session"
+LAST_SESSION_PROBLEMS_KEY = "Problems during last session"
 
 
 def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
@@ -176,6 +181,16 @@ def whatsapp_device(key: str, device_name: str, inputs, outputs) -> str | None:
     return other
 
 
+def voicemeeter_issues(names: dict[str, str]) -> list[Issue]:
+    """VOICEMEETER_CLOSED for each direction with a Voicemeeter device chosen
+    (names: device_combos key -> device name) while Banana isn't running. Blocks
+    ~0.1 s (tasklist) when one is chosen."""
+    labels = sorted({key.split(".")[0] for key, name in names.items() if uses_voicemeeter(name)})
+    if not labels or voicemeeter_running():
+        return []
+    return [Issue(label, IssueCode.VOICEMEETER_CLOSED) for label in labels]
+
+
 def whatsapp_hint(key: str, device_name: str, inputs, outputs) -> str:
     """What to choose in WhatsApp's audio settings for the device picked in one of
     the WhatsApp combos. WhatsApp needs the OTHER end of the wire: its Speaker
@@ -244,6 +259,12 @@ class LiveInterpreterWindow(QMainWindow):
         # WhatsApp outgoing route (that would play the test sound to the
         # candidate mid-call). Start allows these, with LOOP_TEST_PARTIAL shown.
         self._partial_fingerprints: set[frozenset] = set()
+        # The last session, for bug reports (report_context, storage/last_session.py):
+        # when it started and ended, and every issue code raised meanwhile, since
+        # most clear before the tester gets to the report.
+        self._session_started: datetime | None = None
+        self._session_ended: datetime | None = None
+        self._session_issues: dict[tuple[str, IssueCode], Severity] = {}
         # Set when closing waits for the session (or loop test) to finish; the
         # window closes itself then. Read by ui/main_window.py.
         self.close_pending = False
@@ -385,7 +406,7 @@ class LiveInterpreterWindow(QMainWindow):
         # edits. Item data = model id; both directions use it; fixed while running.
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
-        for model_name, model_id in LIVE_MODELS.items():
+        for model_name, model_id in offered_models(RELEASE).items():
             self.model_combo.addItem(model_name, model_id)
             self.model_combo.setItemData(self.model_combo.count() - 1, model_id, Qt.ItemDataRole.ToolTipRole)
         saved_model = self.model_combo.findData(self._user_config.model)
@@ -547,6 +568,10 @@ class LiveInterpreterWindow(QMainWindow):
         if issues:
             self._show_pre_start_issues(issues, "Can't start: fix the audio setup below.")
             return  # hard gate: never start with a known loop
+        issues = voicemeeter_issues(self._expected_names())  # ~0.1 s (tasklist)
+        if issues:
+            self._show_pre_start_issues(issues, "Can't start: open Voicemeeter Banana first.")
+            return
         fingerprint = routing_fingerprint(self._expected_names())
         if fingerprint in self._partial_fingerprints and fingerprint not in self._passed_fingerprints:
             # Started without playing into the call: say what wasn't tested.
@@ -560,6 +585,9 @@ class LiveInterpreterWindow(QMainWindow):
         self._save_choices()
         self._session_error = ""
         self._session_translating = False
+        self._session_started, self._session_ended = datetime.now(), None
+        self._session_issues = {(issue.label, issue.code): issue.level
+                                for issue in self.issue_panel.active_issues()}  # e.g. LOOP_TEST_PARTIAL
         self._direction_states.clear()
         self._direction_messages.clear()
         self._set_controls_locked(True)
@@ -592,6 +620,8 @@ class LiveInterpreterWindow(QMainWindow):
         and close once it reports idle. A loop test can't be cancelled, so closing
         waits for it to finish."""
         if not (self._manager.running or self._loop_test_running):
+            # Testers report bugs from the home window, after closing this one.
+            self._save_on_close()
             super().closeEvent(event)
             return
         event.ignore()
@@ -619,7 +649,8 @@ class LiveInterpreterWindow(QMainWindow):
         if issues:
             self._show_pre_start_issues(issues, "Fix the audio setup below, then test again.")
             return
-        fingerprint = routing_fingerprint(self._expected_names())
+        names = self._expected_names()
+        fingerprint = routing_fingerprint(names)
         # Start may run while the WhatsApp call is already going: never play the
         # test sound into the outgoing route then. Only the Test Audio Devices
         # button (meant for before the call) tests that route.
@@ -628,21 +659,29 @@ class LiveInterpreterWindow(QMainWindow):
         self._set_controls_locked(True)  # the test owns the devices until it finishes
         self._set_status("Checking audio… you should hear a short test sound in the headset." if skip else
                          "Checking audio… you should hear a short test sound on each output.")
-        threading.Thread(
-            target=lambda: self.loop_test_finished.emit(
-                (fingerprint, start_after, bool(skip), run_loop_test(directions, skip_playbacks=skip))),
-            daemon=True,
-        ).start()
+
+        def work():
+            # Start has just checked Voicemeeter itself; the button checks it alongside the test.
+            closed = [] if start_after else voicemeeter_issues(names)
+            issues = run_loop_test(directions, skip_playbacks=skip)
+            self.loop_test_finished.emit((fingerprint, start_after, bool(skip), issues, closed))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_loop_test_finished(self, result) -> None:
-        fingerprint, start_after, partial, issues = result
+        fingerprint, start_after, partial, issues, voicemeeter_closed = result
         self._loop_test_running = False
         if self.close_pending:
             self.close()  # closing was waiting for the test; don't start a session
             return
         self._set_controls_locked(False)
-        if issues:
-            self._show_pre_start_issues(issues, "Audio test failed: fix the audio setup below.")
+        if issues or voicemeeter_closed:
+            # Not cached as a pass with Banana closed: its routing (and any loop
+            # through it) only exists while it runs.
+            self._show_pre_start_issues(
+                issues + voicemeeter_closed,
+                "Audio test failed: fix the audio setup below." if issues else
+                "Voicemeeter Banana is closed: open it, then test again.")
             return
         (self._partial_fingerprints if partial else self._passed_fingerprints).add(fingerprint)
         # A pass supersedes any earlier failed check: drop those rows so the dot
@@ -687,6 +726,8 @@ class LiveInterpreterWindow(QMainWindow):
                 self._set_status(f"Stopped with an error: {self._session_error}"
                                  if self._session_error else "Stopped.")
                 logger.info("Live translation session ended.")
+                self._session_ended = datetime.now()
+                save_last_session(self.report_context())
                 if self.close_pending:
                     self.close()
 
@@ -722,6 +763,9 @@ class LiveInterpreterWindow(QMainWindow):
         WhatsApp rather than this window."""
         self.issue_panel.show_issue(issue)
         self._refresh_indicator()
+        if issue.active and self._manager.running:
+            key = (issue.label, issue.code)
+            self._session_issues[key] = max(issue.level, self._session_issues.get(key, Severity.OK))
         if issue.active and issue.level is Severity.PROBLEM:
             QApplication.alert(self)
 
@@ -784,11 +828,11 @@ class LiveInterpreterWindow(QMainWindow):
             widget.setEnabled(not locked)
 
     def _two_way_config(self) -> TwoWayConfig:
-        """Both directions from the combos. A translates into STAFF_OUTPUT_LANGUAGE and
-        keeps echo_target_language=True (the candidate may mix English in, and staff
-        must hear all of it). B translates into the candidate's language with
-        echo_target_language=False (staff always speak English, so a re-captured
-        translation on B dies after one pass). guide/two_way_plan.md §4.6."""
+        """Both directions from the combos. A translates into STAFF_OUTPUT_LANGUAGE, B
+        into the candidate's language. Both keep echo_target_language=True: the
+        candidate may mix English in, and testers on B also speak the candidate's
+        language, which False left silent, so the other side heard nothing
+        (developer decision, 2026-10-15). guide/two_way_plan.md §4.6."""
         return TwoWayConfig(
             candidate_to_staff=DirectionConfig(
                 label=CANDIDATE_TO_STAFF,
@@ -803,7 +847,7 @@ class LiveInterpreterWindow(QMainWindow):
                 capture=self._device_config(f"{STAFF_TO_CANDIDATE}.capture"),
                 playback=self._device_config(f"{STAFF_TO_CANDIDATE}.playback"),
                 target_language_code=self.selected_language_code(),
-                echo_target_language=False,
+                echo_target_language=True,
                 model=self.selected_model(),
             ),
         )
@@ -833,7 +877,34 @@ class LiveInterpreterWindow(QMainWindow):
         context["Problems shown"] = ", ".join(
             f"{issue.label or '-'}:{issue.code.name} ({issue.level.name.lower()})"
             for issue in self.issue_panel.active_issues()) or "none"
+        context[LAST_SESSION_KEY] = self._last_session_summary()
+        context[LAST_SESSION_PROBLEMS_KEY] = ", ".join(
+            f"{label or '-'}:{code.name} ({level.name.lower()})"
+            for (label, code), level in self._session_issues.items()) or "none"
         return context
+
+    def _last_session_summary(self) -> str:
+        """When the last session in this window ran, and how it ended."""
+        start, end = self._session_started, self._session_ended
+        if start is None:
+            return "none in this window"
+        if end is None:
+            return f"started {start:%Y-%m-%d %H:%M:%S}, still running"
+        seconds = round((end - start).total_seconds())
+        outcome = "with an error" if self._session_error else "normally"
+        return (f"{start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S} ({seconds // 60} min {seconds % 60} s), "
+                f"ended {outcome}")
+
+    def _save_on_close(self) -> None:
+        """Save report_context for the home window's bug report. A window that ran
+        no session keeps the previous window's last-session lines."""
+        context = self.report_context()
+        if self._session_started is None:
+            previous = load_last_session() or {}
+            for key in (LAST_SESSION_KEY, LAST_SESSION_PROBLEMS_KEY):
+                if key in previous:
+                    context[key] = previous[key]
+        save_last_session(context)
 
     def selected_language_code(self) -> str:
         """BCP-47 code for the "Candidate hears" combo: direction B's target language."""

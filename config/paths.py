@@ -33,6 +33,11 @@ def user_config_file() -> Path:
     return user_data_dir() / "user_config.json"
 
 
+def last_session_file() -> Path:
+    """The Live Interpreter's last report context (storage/last_session.py)."""
+    return user_data_dir() / "last_session.json"
+
+
 def debug_dump_dir() -> Path:
     """Raw audio dumps (engines/gemini_live.py dump_raw_audio). Dev only."""
     return _REPO_ROOT / "debug_dumps"

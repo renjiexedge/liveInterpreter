@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QDialog, QFrame, QGraphicsDropShadowEffect, QGrid
 
 from config.paths import resource_path
 from config.ui_config import UserProfile
+from storage.last_session import SAVED_AT_KEY, load_last_session
 from storage.user_config import load_user_config
 from ui.bug_report import BugReportDialog
 from ui.style import set_style_property
@@ -292,9 +293,16 @@ class MainWindow(QMainWindow):
 
     # ---- header actions ----------------------------------------------------
     def _report_bug(self) -> None:
-        # Settings and issues come from the interpreter window, if it's open.
+        # Settings and issues come from the interpreter window if it's open, else
+        # from what it saved when its last session ended or it closed.
         window = self._windows.get("live_interpreter")
-        context = window.report_context() if window is not None else None
+        if window is not None:
+            context = window.report_context()
+        else:
+            context = load_last_session()
+            if context is not None:
+                saved_at = context.pop(SAVED_AT_KEY, "?")
+                context = {"Live Interpreter": f"window closed; saved {saved_at}", **context}
         BugReportDialog(self, reporter=self._profile.name(), context=context).exec()
 
     def _run_setup_wizard(self) -> None:

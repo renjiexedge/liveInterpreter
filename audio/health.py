@@ -38,6 +38,7 @@ class IssueCode(enum.Enum):
     DEVICE_OPEN_FAILED = "device_open_failed"
     DEVICE_NOT_SELECTED = "device_not_selected"
     DRIVER_MISSING = "driver_missing"  # a locked WhatsApp combo found no device
+    VOICEMEETER_CLOSED = "voicemeeter_closed"  # Start / Test Audio Devices with Banana closed
     # During a session (HealthMonitor)
     INPUT_DISCONNECTED = "input_disconnected"
     OUTPUT_DISCONNECTED = "output_disconnected"
@@ -47,6 +48,7 @@ class IssueCode(enum.Enum):
     OUTPUT_STUTTER = "output_stutter"
     OUTPUT_LAGGING = "output_lagging"
     OUTPUT_SKIPPED = "output_skipped"
+    OUTPUT_STALLED = "output_stalled"  # raised by run_session's stall watch, via SessionManager
     ECHO_SAME_DIRECTION = "echo_same_direction"
     ECHO_LOCAL = "echo_local"
     ECHO_REMOTE = "echo_remote"
@@ -64,7 +66,7 @@ ECHO_CODES = frozenset({IssueCode.ECHO_SAME_DIRECTION, IssueCode.ECHO_LOCAL, Iss
 PRE_START_CODES = frozenset({
     IssueCode.ROUTING_LOOP, IssueCode.DEVICE_SHARED, IssueCode.DEVICE_LIST_CHANGED,
     IssueCode.AUDIO_TEST_FAILED, IssueCode.DEVICE_OPEN_FAILED, IssueCode.DEVICE_NOT_SELECTED,
-    IssueCode.LOOP_TEST_PARTIAL, IssueCode.DRIVER_MISSING,
+    IssueCode.LOOP_TEST_PARTIAL, IssueCode.DRIVER_MISSING, IssueCode.VOICEMEETER_CLOSED,
 })
 # Still shown after the session ends, so the user can see why it went wrong.
 STICKY_CODES = ECHO_CODES | {
@@ -120,6 +122,12 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         Severity.PROBLEM,
         "'{device}' wasn't found: {product} isn't installed.",
         "Install {product} (see the setup guide), restart the computer, then reopen this app."),
+    # A blocker before Start, unlike VOICEMEETER_NOT_RUNNING during a session: with
+    # Banana closed the candidate hears nothing, and a loop test then proves nothing.
+    IssueCode.VOICEMEETER_CLOSED: IssueText(
+        Severity.PROBLEM,
+        "Voicemeeter Banana isn't running, so the candidate wouldn't hear the translation.",
+        "Open Voicemeeter Banana from the Start menu (it can stay minimised), then try again."),
     # Spec §8.2 "Headset unplugged". The monitor keeps re-opening the device
     # (HealthConfig.reopen_devices), so plugging it back in resumes the route.
     IssueCode.INPUT_DISCONNECTED: IssueText(
@@ -159,6 +167,12 @@ CATALOGUE: dict[IssueCode, IssueText] = {
         "Translated audio fell more than {seconds} s behind, so some of it was skipped to catch up.",
         "Ask the speaker to repeat anything that was missed. If it keeps happening, check your "
         "internet connection and close other heavy apps."),
+    IssueCode.OUTPUT_STALLED: IssueText(
+        Severity.WARNING,
+        "Speech was heard but no translation came back for {seconds} s, so the translation "
+        "was restarted.",
+        "Repeat the last thing that was said (or ask the other person to). This clears once "
+        "translation comes through again."),
     IssueCode.ECHO_SAME_DIRECTION: IssueText(
         Severity.WARNING,
         "Echo detected: the translation played on '{playback}' is being picked up again by '{capture}'.",
@@ -433,7 +447,14 @@ class HealthMonitor:
     def player_ready(self, label: str, player) -> None:
         self._dirs[label].player = player
 
+    def output_stalled(self, label: str, seconds: float) -> None:
+        """run_session restarted the direction's connection because speech got no
+        translation back (ResilienceConfig.stall_after_s). Clears on the next output."""
+        self._set(label, IssueCode.OUTPUT_STALLED, True, seconds=f"{seconds:g}")
+
     def transcript_delta(self, label: str, kind: str, text: str) -> None:
+        if kind == "output" and (label, IssueCode.OUTPUT_STALLED) in self._reported:
+            self._set(label, IssueCode.OUTPUT_STALLED, False)
         hit = self._echo.feed(label, kind, text, time.monotonic())
         if hit is not None:
             self._handle_echo(hit)
@@ -488,10 +509,10 @@ class HealthMonitor:
                 self._maybe_reopen(d, "playback", player, now - player.last_callback_at, now)
                 self._set(label, IssueCode.OUTPUT_STUTTER,
                           d.stutter_watch.update(player.mid_speech_underruns, now))
-                lag_ms = player.buffered_ms
+                lag_ms = player.lag_ms
                 d.lagging = lag_ms > cfg.lag_warn_ms or (d.lagging and lag_ms >= cfg.lag_clear_ms)
                 self._set(label, IssueCode.OUTPUT_LAGGING, d.lagging, seconds=round(lag_ms / 1000))
-                cap_ms = player.max_buffered_ms
+                cap_ms = player.max_lag_ms
                 self._set(label, IssueCode.OUTPUT_SKIPPED,
                           d.skip_watch.update(player.overflow_dropped_frames, now),
                           seconds=f"{cap_ms / 1000:g}" if cap_ms else "?")

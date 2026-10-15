@@ -416,6 +416,7 @@ class SessionManager:
                 model=d.model,
                 on_reconnecting=on_reconnecting,
                 should_reconnect=should_reconnect,
+                on_stalled=lambda seconds: monitor.output_stalled(label, seconds),
             )
             self._on_direction_state(label, DirectionState.STOPPED, "")
         except asyncio.CancelledError:

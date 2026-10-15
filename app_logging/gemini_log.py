@@ -37,10 +37,10 @@ class ChunkStats:
 
     Given the session's AudioPlayer, the line also shows its playback side for
     the same window: how much device time the output stream actually pulled
-    (under 100% means callbacks were lost, which turns into lag), how far
-    behind playback is, underruns split by cause, and audio dropped to keep up
-    (silence while behind, the oldest audio past the queue cap, and
-    interrupted turns)."""
+    (under 100% means callbacks were lost, which turns into lag), how much is
+    queued and how far behind real time playback is, underruns split by cause,
+    and audio dropped to keep up (silence while queued, the oldest audio past
+    the lag cap, and interrupted turns)."""
 
     def __init__(self, label: str = "", interval_s: float = 5.0, player=None):
         self._label = label
@@ -68,7 +68,7 @@ class ChunkStats:
         pulled_s = delta["frames_requested"] / rate
         return (
             f" | playback: device pulled {pulled_s:.2f}s ({100 * pulled_s / elapsed_s:.1f}%), "
-            f"behind {self._player.buffered_ms:.0f} ms, "
+            f"queued {self._player.buffered_ms:.0f} ms, behind {self._player.lag_ms:.0f} ms, "
             f"PortAudio underflows {delta['portaudio_underflows']}, "
             f"empty-buffer underruns {delta['empty_buffer_underruns']}, "
             f"silence dropped {1000 * delta['silence_dropped_frames'] / rate:.0f} ms, "

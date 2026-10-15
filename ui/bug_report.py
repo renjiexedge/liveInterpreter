@@ -24,7 +24,8 @@ class BugReportDialog(QDialog):
     or the tester picks "Send it myself", the folder and an email draft open.
 
     context: "Devices and settings" lines from the open Live Interpreter window
-    (LiveInterpreterWindow.report_context), or None if it isn't open."""
+    (LiveInterpreterWindow.report_context), or the ones it last saved
+    (storage/last_session.py), or None if it has never been opened."""
 
     # (sent, message) from the relay worker thread; the slot runs on the GUI thread.
     _send_finished = Signal(bool, str)
